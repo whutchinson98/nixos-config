@@ -1,0 +1,1477 @@
+import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { Message } from "@mariozechner/pi-ai";
+import { StringEnum, Type } from "@mariozechner/pi-ai";
+import { Text } from "@mariozechner/pi-tui";
+import {
+  formatSize,
+  truncateHead,
+  type ExtensionAPI,
+  type ExtensionContext,
+  withFileMutationQueue,
+} from "@mariozechner/pi-coding-agent";
+import { notify as sendSystemNotification } from "../system-notify";
+import {
+  type AgentConfig,
+  type AgentDiscoveryResult,
+  type AgentScope,
+  discoverAgents,
+  formatAgentList,
+} from "../subagent/agents";
+
+const DEFAULT_PLANNER_AGENT = "planner";
+const DEFAULT_BUILDER_AGENT = "builder";
+const DEFAULT_PLAN_DIR = ".pi/plans";
+const DEFAULT_MAX_CONCURRENCY = 1;
+// Builder agents share the same working copy. Keep plan builds serial so each
+// completed task can create an atomic Jujutsu commit without sweeping in a
+// concurrent task's changes.
+const MAX_CONCURRENCY = 1;
+const STDERR_TAIL_LIMIT = 20_000;
+const COMMAND_LOG_MIN_INTERVAL_MS = 1_500;
+const COMMAND_LOG_MAX_ENTRIES = 80;
+
+type TextContent = { type: "text"; text: string };
+type TaskStatus = "pending" | "in-progress" | "done" | "failed" | "blocked";
+
+interface UsageStats {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+  contextTokens: number;
+  turns: number;
+}
+
+interface AgentRunResult {
+  agent: string;
+  agentSource: "user" | "project" | "unknown";
+  task: string;
+  cwd: string;
+  exitCode: number;
+  finalOutput: string;
+  stderr: string;
+  usage: UsageStats;
+  model?: string;
+  stopReason?: string;
+  errorMessage?: string;
+  progressMessage?: string;
+}
+
+interface PlanTask {
+  id: string;
+  title: string;
+  status: string;
+  dependsOn: string[];
+  block: string;
+  start: number;
+  end: number;
+}
+
+interface PlanCreateDetails {
+  path: string;
+  plannerAgent: string;
+  builderAgent: string;
+  taskCount: number;
+  warnings: string[];
+}
+
+interface PlanBuildResult {
+  task: PlanTask;
+  run: AgentRunResult;
+  status: TaskStatus;
+  marker?: string;
+}
+
+interface PlanBuildDetails {
+  path: string;
+  builderAgent: string;
+  maxConcurrency: number;
+  results: Array<{
+    id: string;
+    title: string;
+    status: TaskStatus;
+    exitCode: number;
+    output: string;
+  }>;
+  skipped: Array<{
+    id: string;
+    title: string;
+    reason: string;
+  }>;
+}
+
+type ToolUpdate<TDetails> = { content: TextContent[]; details: TDetails };
+type OnUpdateCallback<TDetails> = (partial: ToolUpdate<TDetails>) => void;
+
+const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
+  description:
+    'Which agent directories to use. Default: "user" loads ~/.pi/agent/agents. Use "project" or "both" only for trusted repos.',
+  default: "user",
+});
+
+const PlanCreateParams = Type.Object({
+  request: Type.String({ description: "Implementation request for the planner agent." }),
+  path: Type.Optional(
+    Type.String({
+      description:
+        'Plan file path to write. Relative paths resolve from pi cwd. Default: ".pi/plans/<timestamp>-<slug>.md".',
+    }),
+  ),
+  plannerAgent: Type.Optional(Type.String({ description: 'Planner agent name. Default: "planner".' })),
+  builderAgent: Type.Optional(
+    Type.String({
+      description:
+        'Builder agent name recorded in the plan and used in generated task instructions. Default: "builder".',
+    }),
+  ),
+  agentScope: Type.Optional(AgentScopeSchema),
+  overwrite: Type.Optional(Type.Boolean({ description: "Overwrite an existing plan file. Default: false.", default: false })),
+  confirmProjectAgents: Type.Optional(
+    Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
+  ),
+});
+
+const PlanBuildParams = Type.Object({
+  path: Type.String({ description: "Plan file path to read. Relative paths resolve from pi cwd." }),
+  taskIds: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Optional task ids to run, e.g. [\"T01\", \"T02\"]. If omitted, all pending/failed/blocked tasks are considered.",
+    }),
+  ),
+  builderAgent: Type.Optional(Type.String({ description: 'Builder agent name. Default: "builder".' })),
+  agentScope: Type.Optional(AgentScopeSchema),
+  maxConcurrency: Type.Optional(
+    Type.Number({
+      description: `Maximum number of builder agents to run at once. Default: ${DEFAULT_MAX_CONCURRENCY}, max: ${MAX_CONCURRENCY}. Kept at 1 so each completed task can create an atomic Jujutsu commit.`,
+      default: DEFAULT_MAX_CONCURRENCY,
+      minimum: 1,
+      maximum: MAX_CONCURRENCY,
+    }),
+  ),
+  confirmProjectAgents: Type.Optional(
+    Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
+  ),
+});
+
+const PlanListParams = Type.Object({
+  limit: Type.Optional(Type.Number({ description: "Maximum number of plan files to list. Default: 10.", default: 10 })),
+});
+
+function emptyUsage(): UsageStats {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+}
+
+function appendStderrTail(current: string, chunk: string): string {
+  const next = current + chunk;
+  if (next.length <= STDERR_TAIL_LIMIT) return next;
+  return next.slice(next.length - STDERR_TAIL_LIMIT);
+}
+
+function truncateText(text: string, maxBytes = 50 * 1024, maxLines = 2_000): string {
+  const truncation = truncateHead(text, { maxBytes, maxLines });
+  if (!truncation.truncated) return truncation.content;
+
+  return `${truncation.content}\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(
+    truncation.outputBytes,
+  )} of ${formatSize(truncation.totalBytes)}).]`;
+}
+
+function truncateInline(text: string, maxLength = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function truncateInlineTail(text: string, maxLength = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `...${normalized.slice(Math.max(0, normalized.length - maxLength + 3))}`;
+}
+
+function formatJsonValue(value: unknown, maxLength = 80): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return truncateInline(value, maxLength);
+
+  try {
+    return truncateInline(JSON.stringify(value), maxLength);
+  } catch {
+    return truncateInline(String(value), maxLength);
+  }
+}
+
+function formatToolArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+
+  const record = args as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const key of ["path", "pattern", "query", "command", "glob", "limit"]) {
+    const value = formatJsonValue(record[key], 48);
+    if (value) parts.push(`${key}=${value}`);
+  }
+
+  if (parts.length === 0) {
+    const fallback = formatJsonValue(args, 96);
+    if (fallback) parts.push(fallback);
+  }
+
+  return parts.length ? ` (${parts.join(", ")})` : "";
+}
+
+function messageText(message: Message): string {
+  const content = Array.isArray(message.content) ? message.content : [];
+  return content
+    .filter((part): part is TextContent => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n\n")
+    .trim();
+}
+
+function finalAssistantOutput(messages: Message[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+
+    const text = messageText(message);
+    if (text) return text;
+  }
+
+  return "";
+}
+
+function updateUsageFromMessage(result: AgentRunResult, message: Message): void {
+  if (message.role !== "assistant") return;
+
+  result.usage.turns++;
+
+  const usage = message.usage;
+  if (usage) {
+    result.usage.input += usage.input || 0;
+    result.usage.output += usage.output || 0;
+    result.usage.cacheRead += usage.cacheRead || 0;
+    result.usage.cacheWrite += usage.cacheWrite || 0;
+    result.usage.cost += usage.cost?.total || 0;
+    result.usage.contextTokens = usage.totalTokens || 0;
+  }
+
+  if (!result.model && message.model) result.model = message.model;
+  if (message.stopReason) result.stopReason = message.stopReason;
+  if (message.errorMessage) result.errorMessage = message.errorMessage;
+}
+
+function isAgentErrored(result: AgentRunResult): boolean {
+  return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+function summarizeFailure(result: AgentRunResult): string {
+  return result.errorMessage || result.stderr.trim() || result.finalOutput || `pi exited with code ${result.exitCode}`;
+}
+
+function resolvePath(cwd: string, rawPath: string): string {
+  const normalized = rawPath.trim().replace(/^@/, "");
+  return path.isAbsolute(normalized) ? normalized : path.resolve(cwd, normalized);
+}
+
+function displayPath(cwd: string, absolutePath: string): string {
+  const relative = path.relative(cwd, absolutePath);
+  if (!relative.startsWith("..") && !path.isAbsolute(relative)) return relative || ".";
+  return absolutePath;
+}
+
+function slugify(text: string): string {
+  const slug = text
+    .toLowerCase()
+    .replace(/`[^`]*`/g, " ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/g, "");
+
+  return slug || "plan";
+}
+
+function timestampForFile(date = new Date()): string {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z").replace("T", "-");
+}
+
+function defaultPlanPath(cwd: string, request: string): string {
+  return path.resolve(cwd, DEFAULT_PLAN_DIR, `${timestampForFile()}-${slugify(request)}.md`);
+}
+
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function planFileHeader(request: string, plannerAgent: string, builderAgent: string): string {
+  return [
+    "---",
+    "planFileVersion: 1",
+    `createdAt: ${yamlString(new Date().toISOString())}`,
+    `request: ${yamlString(request)}`,
+    `plannerAgent: ${yamlString(plannerAgent)}`,
+    `builderAgent: ${yamlString(builderAgent)}`,
+    'status: "pending"',
+    "---",
+    "",
+    `> Generated by \`plan_file_create\` using the \`${plannerAgent}\` agent.`,
+    `> Run ready tasks with \`/plan-build <this-file>\` or ask pi to use \`plan_file_build\`.`,
+    "",
+  ].join("\n");
+}
+
+function createPlannerTask(request: string, builderAgent: string): string {
+  return [
+    "Create a multi-agent implementation plan for this request:",
+    "",
+    request,
+    "",
+    "The output will be saved as a plan file and consumed by an extension that dispatches task blocks to builder agents.",
+    `Assume each task will be implemented by a separate \`${builderAgent}\` agent and should become its own atomic Jujutsu (\`jj\`) commit.`,
+    "",
+    "Requirements:",
+    "- Analyze the actual repository before planning.",
+    "- Do not modify files.",
+    "- Output markdown only; do not wrap the plan in a code fence.",
+    "- Split work into small, builder-sized tasks that can be run independently when possible.",
+    "- Treat each task as one atomic commit boundary; do not mix unrelated work into a task.",
+    "- Add dependencies when tasks must run after another task.",
+    "- Avoid assigning the same file to multiple tasks unless a dependency orders the edits.",
+    "- Include exact file paths, verification commands, and edge cases.",
+    "",
+    "Use this exact machine-readable task format for every builder task:",
+    "",
+    "## Builder Tasks",
+    "",
+    "### Task T01: Short imperative title",
+    "Status: pending",
+    "Depends on: none",
+    "Files:",
+    "- path/to/file.ts",
+    "Instructions:",
+    "- Specific implementation instruction.",
+    "Verification:",
+    "- Exact command or manual check.",
+    "",
+    "### Task T02: Short imperative title",
+    "Status: pending",
+    "Depends on: T01",
+    "Files:",
+    "- path/to/other-file.ts",
+    "Instructions:",
+    "- Specific implementation instruction.",
+    "Verification:",
+    "- Exact command or manual check.",
+    "",
+    "Keep task ids sequential as T01, T02, T03, etc.",
+    "Use Depends on: none for independent tasks, or a comma-separated list like Depends on: T01, T02.",
+  ].join("\n");
+}
+
+function parseTaskIds(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
+function normalizeTaskId(taskId: string): string {
+  return taskId.trim().toUpperCase();
+}
+
+function parseDependsOn(block: string): string[] {
+  const match = block.match(/^Depends on:\s*(.+)$/im);
+  if (!match) return [];
+
+  const value = match[1].trim();
+  if (!value || /^none$/i.test(value)) return [];
+
+  return value
+    .split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map(normalizeTaskId);
+}
+
+function parsePlanTasks(content: string): PlanTask[] {
+  const headingPattern = /^###\s+Task\s+([A-Za-z0-9][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*$/gm;
+  const sectionPattern = /^##\s+[^#].*$/gm;
+  const matches = Array.from(content.matchAll(headingPattern));
+  const sectionStarts = Array.from(content.matchAll(sectionPattern)).map((match) => match.index ?? 0);
+
+  return matches.map((match, index) => {
+    const start = match.index ?? 0;
+    const nextTaskStart = matches[index + 1]?.index ?? content.length;
+    const nextSectionStart = sectionStarts.find((sectionStart) => sectionStart > start) ?? content.length;
+    const end = Math.min(nextTaskStart, nextSectionStart);
+    const block = content.slice(start, end).trimEnd();
+    const statusMatch = block.match(/^Status:\s*([A-Za-z][A-Za-z0-9_-]*)\s*$/im);
+
+    return {
+      id: normalizeTaskId(match[1]),
+      title: match[2].trim(),
+      status: statusMatch?.[1]?.trim().toLowerCase() ?? "pending",
+      dependsOn: parseDependsOn(block),
+      block,
+      start,
+      end,
+    };
+  });
+}
+
+function replaceTaskStatus(block: string, status: TaskStatus): string {
+  if (/^Status:\s*.*$/im.test(block)) {
+    return block.replace(/^Status:\s*.*$/im, `Status: ${status}`);
+  }
+
+  const firstLineEnd = block.indexOf("\n");
+  if (firstLineEnd === -1) return `${block}\nStatus: ${status}`;
+
+  return `${block.slice(0, firstLineEnd + 1)}Status: ${status}\n${block.slice(firstLineEnd + 1)}`;
+}
+
+function escapeCodeFence(text: string): string {
+  return text.replace(/```/g, "``\\`");
+}
+
+function builderResultLog(result: PlanBuildResult): string {
+  const output = result.run.finalOutput || (isAgentErrored(result.run) ? summarizeFailure(result.run) : "(no output)");
+  const marker = result.marker ? `\n- Result marker: ${result.marker}` : "";
+
+  return [
+    `#### Builder result ${new Date().toISOString()}`,
+    `- Agent: ${result.run.agent}`,
+    `- Status: ${result.status}`,
+    `- Exit code: ${result.run.exitCode}`,
+    marker,
+    "",
+    "```text",
+    escapeCodeFence(truncateText(output, 12 * 1024, 400)),
+    "```",
+  ].join("\n");
+}
+
+async function updatePlanTaskStatus(
+  absolutePath: string,
+  taskId: string,
+  status: TaskStatus,
+  appendLog?: string,
+): Promise<void> {
+  await withFileMutationQueue(absolutePath, async () => {
+    const content = await fs.promises.readFile(absolutePath, "utf8");
+    const tasks = parsePlanTasks(content);
+    const task = tasks.find((candidate) => candidate.id === normalizeTaskId(taskId));
+    if (!task) throw new Error(`Task ${taskId} was not found in ${absolutePath}.`);
+
+    let block = replaceTaskStatus(task.block, status);
+    if (appendLog) block = `${block.trimEnd()}\n\n${appendLog}`;
+
+    const suffix = content.slice(task.end);
+    const separator = suffix.length > 0 ? (block.endsWith("\n") ? "\n" : "\n\n") : "\n";
+    const nextContent = `${content.slice(0, task.start)}${block}${separator}${suffix}`;
+    await fs.promises.writeFile(absolutePath, nextContent, "utf8");
+  });
+}
+
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  const currentScript = process.argv[1];
+  const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+
+  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+
+  const execName = path.basename(process.execPath).toLowerCase();
+  const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+  if (!isGenericRuntime) return { command: process.execPath, args };
+
+  return { command: "pi", args };
+}
+
+async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-planner-builder-"));
+  const safeName = agentName.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  const filePath = path.join(dir, `prompt-${safeName}.md`);
+
+  await withFileMutationQueue(filePath, async () => {
+    await fs.promises.writeFile(filePath, prompt, { encoding: "utf8", mode: 0o600 });
+  });
+
+  return { dir, filePath };
+}
+
+async function runAgent(
+  defaultCwd: string,
+  agents: AgentConfig[],
+  agentName: string,
+  task: string,
+  signal: AbortSignal | undefined,
+  onOutput?: (result: AgentRunResult) => void,
+): Promise<AgentRunResult> {
+  const agent = agents.find((candidate) => candidate.name === agentName);
+  const result: AgentRunResult = {
+    agent: agentName,
+    agentSource: agent?.source ?? "unknown",
+    task,
+    cwd: defaultCwd,
+    exitCode: 0,
+    finalOutput: "",
+    stderr: "",
+    usage: emptyUsage(),
+    model: agent?.model,
+  };
+
+  if (!agent) {
+    const available = agents.map((candidate) => candidate.name).join(", ") || "none";
+    return {
+      ...result,
+      exitCode: 1,
+      stderr: `Unknown agent "${agentName}". Available agents: ${available}.`,
+    };
+  }
+
+  const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
+  if (agent.model) args.push("--model", agent.model);
+  if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+
+  let promptDir: string | undefined;
+  const messages: Message[] = [];
+
+  try {
+    if (agent.systemPrompt.trim()) {
+      const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
+      promptDir = prompt.dir;
+      args.push("--append-system-prompt", prompt.filePath);
+    }
+
+    args.push(`Task: ${task}`);
+
+    let stdoutBuffer = "";
+    let wasAborted = false;
+    let abortCleanup: (() => void) | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastOutputUpdateAt = 0;
+    let assistantDraft = "";
+
+    const emitOutput = (force = false) => {
+      if (!onOutput) return;
+
+      const now = Date.now();
+      if (!force && now - lastOutputUpdateAt < 500) return;
+      lastOutputUpdateAt = now;
+      onOutput(result);
+    };
+
+    result.exitCode = await new Promise<number>((resolve) => {
+      const invocation = getPiInvocation(args);
+      const proc = spawn(invocation.command, invocation.args, {
+        cwd: defaultCwd,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+
+      const processLine = (line: string) => {
+        if (!line.trim()) return;
+
+        let event: any;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          return;
+        }
+
+        if (event.type === "agent_start") {
+          result.progressMessage = `${agent.name} started.`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "turn_start") {
+          result.progressMessage = `${agent.name} is thinking...`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "message_start" && event.message?.role === "assistant") {
+          assistantDraft = "";
+          return;
+        }
+
+        if (event.type === "message_update") {
+          const assistantEvent = event.assistantMessageEvent;
+          const delta = typeof assistantEvent?.delta === "string" ? assistantEvent.delta : "";
+          const fullText = event.message ? messageText(event.message as Message) : "";
+          if (fullText) assistantDraft = fullText;
+          else if (delta) assistantDraft += delta;
+
+          const text = assistantDraft || delta;
+          result.progressMessage = text
+            ? `${agent.name} is writing: ${truncateInlineTail(text, 80)}`
+            : `${agent.name} is writing...`;
+          emitOutput();
+          return;
+        }
+
+        if (event.type === "tool_execution_start") {
+          result.progressMessage = `${agent.name} is running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "tool_execution_update") {
+          result.progressMessage = `${agent.name} is still running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
+          emitOutput();
+          return;
+        }
+
+        if (event.type === "tool_execution_end") {
+          result.progressMessage = `${agent.name} ${event.isError ? "failed" : "finished"} ${event.toolName ?? "tool"}.`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "auto_retry_start") {
+          result.progressMessage = `${agent.name} retrying after error: ${truncateInline(event.errorMessage ?? "unknown error", 80)}`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "compaction_start") {
+          result.progressMessage = `${agent.name} is compacting context...`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "message_end" && event.message) {
+          const message = event.message as Message;
+          messages.push(message);
+          updateUsageFromMessage(result, message);
+          result.finalOutput = finalAssistantOutput(messages);
+          result.progressMessage = result.finalOutput ? `${agent.name} output received.` : `${agent.name} completed a message.`;
+          emitOutput(true);
+          return;
+        }
+
+        if (event.type === "agent_end" && messages.length === 0 && Array.isArray(event.messages)) {
+          for (const message of event.messages as Message[]) {
+            messages.push(message);
+            updateUsageFromMessage(result, message);
+          }
+          result.finalOutput = finalAssistantOutput(messages);
+          result.progressMessage = result.finalOutput ? `${agent.name} output received.` : `${agent.name} finished.`;
+          emitOutput(true);
+        }
+      };
+
+      proc.stdout.setEncoding("utf8");
+      proc.stderr.setEncoding("utf8");
+
+      proc.stdout.on("data", (chunk: string) => {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split("\n");
+        stdoutBuffer = lines.pop() ?? "";
+        for (const line of lines) processLine(line);
+      });
+
+      proc.stderr.on("data", (chunk: string) => {
+        result.stderr = appendStderrTail(result.stderr, chunk);
+        const lastLine = chunk
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .pop();
+        if (lastLine) {
+          result.progressMessage = `${agent.name} stderr: ${truncateInline(lastLine, 90)}`;
+          emitOutput();
+        }
+      });
+
+      proc.on("error", (error) => {
+        result.stderr = appendStderrTail(result.stderr, `${error.message}\n`);
+        result.progressMessage = `${agent.name} process error: ${truncateInline(error.message, 90)}`;
+        emitOutput(true);
+        resolve(1);
+      });
+
+      proc.on("close", (code) => {
+        if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+        if (killTimer) clearTimeout(killTimer);
+        abortCleanup?.();
+        resolve(code ?? 0);
+      });
+
+      const killProcess = () => {
+        wasAborted = true;
+        proc.kill("SIGTERM");
+        killTimer = setTimeout(() => {
+          if (proc.exitCode === null) proc.kill("SIGKILL");
+        }, 5_000);
+        killTimer.unref?.();
+      };
+
+      if (signal?.aborted) {
+        killProcess();
+      } else if (signal) {
+        signal.addEventListener("abort", killProcess, { once: true });
+        abortCleanup = () => signal.removeEventListener("abort", killProcess);
+      }
+    });
+
+    if (wasAborted) {
+      result.stopReason = "aborted";
+      result.errorMessage = "Agent run was aborted.";
+    }
+
+    return result;
+  } finally {
+    if (promptDir) {
+      try {
+        fs.rmSync(promptDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup failures.
+      }
+    }
+  }
+}
+
+async function mapWithConcurrencyLimit<TIn, TOut>(
+  items: TIn[],
+  concurrency: number,
+  fn: (item: TIn, index: number) => Promise<TOut>,
+): Promise<TOut[]> {
+  if (items.length === 0) return [];
+
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results: TOut[] = new Array(items.length);
+  let nextIndex = 0;
+
+  const workers = new Array(limit).fill(undefined).map(async () => {
+    while (true) {
+      const currentIndex = nextIndex++;
+      if (currentIndex >= items.length) return;
+      results[currentIndex] = await fn(items[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+function findAgentOrThrow(agents: AgentConfig[], agentName: string): AgentConfig {
+  const agent = agents.find((candidate) => candidate.name === agentName);
+  if (agent) return agent;
+  throw new Error(`Unknown agent "${agentName}". Available agents:\n${formatAgentList(agents)}`);
+}
+
+async function confirmProjectAgents(
+  ctx: ExtensionContext,
+  discovery: AgentDiscoveryResult,
+  agents: AgentConfig[],
+  agentScope: AgentScope,
+  agentNames: string[],
+  enabled: boolean,
+): Promise<void> {
+  if (!enabled || !ctx.hasUI || (agentScope !== "project" && agentScope !== "both")) return;
+
+  const projectAgents = agentNames
+    .map((name) => agents.find((agent) => agent.name === name))
+    .filter((agent): agent is AgentConfig => agent?.source === "project");
+
+  if (projectAgents.length === 0) return;
+
+  const ok = await ctx.ui.confirm(
+    "Run project-local agents?",
+    [
+      `Agents: ${projectAgents.map((agent) => agent.name).join(", ")}`,
+      `Source: ${discovery.projectAgentsDir ?? "unknown"}`,
+      "",
+      "Project agents are repo-controlled prompts. Only continue for trusted repositories.",
+    ].join("\n"),
+  );
+
+  if (!ok) throw new Error("Canceled: project-local agents were not approved.");
+}
+
+async function createPlanFile(
+  ctx: ExtensionContext,
+  params: {
+    request: string;
+    path?: string;
+    plannerAgent?: string;
+    builderAgent?: string;
+    agentScope?: AgentScope;
+    overwrite?: boolean;
+    confirmProjectAgents?: boolean;
+  },
+  signal?: AbortSignal,
+  onUpdate?: OnUpdateCallback<PlanCreateDetails>,
+): Promise<{ text: string; details: PlanCreateDetails }> {
+  const request = params.request.trim();
+  if (!request) throw new Error("A non-empty request is required.");
+
+  const plannerAgent = params.plannerAgent?.trim() || DEFAULT_PLANNER_AGENT;
+  const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
+  const agentScope = params.agentScope ?? "user";
+  const discovery = discoverAgents(ctx.cwd, agentScope);
+  const agents = discovery.agents;
+  const absolutePath = params.path ? resolvePath(ctx.cwd, params.path) : defaultPlanPath(ctx.cwd, request);
+  const relativePath = displayPath(ctx.cwd, absolutePath);
+  const details: PlanCreateDetails = {
+    path: relativePath,
+    plannerAgent,
+    builderAgent,
+    taskCount: 0,
+    warnings: [],
+  };
+
+  findAgentOrThrow(agents, plannerAgent);
+  findAgentOrThrow(agents, builderAgent);
+  await confirmProjectAgents(ctx, discovery, agents, agentScope, [plannerAgent, builderAgent], params.confirmProjectAgents ?? true);
+
+  if (fs.existsSync(absolutePath) && !params.overwrite) {
+    throw new Error(`Plan file already exists: ${relativePath}. Pass overwrite: true or choose another path.`);
+  }
+
+  onUpdate?.({ content: [{ type: "text", text: `Running ${plannerAgent} to create ${relativePath}...` }], details });
+
+  const plannerResult = await runAgent(ctx.cwd, agents, plannerAgent, createPlannerTask(request, builderAgent), signal, (result) => {
+    const status = result.finalOutput
+      ? `Planner output received for ${relativePath}.`
+      : result.progressMessage
+        ? `${result.progressMessage} Creating ${relativePath}.`
+        : `Running ${plannerAgent} to create ${relativePath}...`;
+
+    onUpdate?.({
+      content: [{ type: "text", text: status }],
+      details,
+    });
+  });
+
+  if (isAgentErrored(plannerResult)) {
+    throw new Error(`Planner agent failed.\n\n${truncateText(summarizeFailure(plannerResult))}`);
+  }
+
+  const planBody = plannerResult.finalOutput.trim();
+  if (!planBody) throw new Error("Planner agent completed without producing a plan.");
+
+  const content = `${planFileHeader(request, plannerAgent, builderAgent)}${planBody}\n`;
+  const tasks = parsePlanTasks(content);
+  details.taskCount = tasks.length;
+
+  if (tasks.length === 0) {
+    details.warnings.push(
+      'No parseable builder tasks found. Expected headings like "### Task T01: Title" followed by "Status: pending".',
+    );
+  }
+
+  await withFileMutationQueue(absolutePath, async () => {
+    await fs.promises.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.promises.writeFile(absolutePath, content, "utf8");
+  });
+
+  const warningText = details.warnings.length ? `\n\nWarnings:\n- ${details.warnings.join("\n- ")}` : "";
+  const taskText = `${tasks.length} builder task${tasks.length === 1 ? "" : "s"}`;
+  const text = `Created plan file ${relativePath} with ${taskText}.${warningText}`;
+
+  notifyPlannerBuilder(`Plan created: ${relativePath} (${taskText}).`);
+  return { text, details };
+}
+
+function createBuilderTask(planPath: string, task: PlanTask, fullPlan: string): string {
+  return [
+    "You are implementing one task from a planner-created multi-agent plan file.",
+    "",
+    `Plan file: ${planPath}`,
+    `Assigned task: ${task.id} - ${task.title}`,
+    "",
+    "Rules:",
+    "- Implement only the assigned task unless a direct dependency is required to make it work.",
+    "- Do not edit the plan file; the planner-builder extension updates task statuses.",
+    "- Avoid unrelated refactors and unrelated files.",
+    "- Use Jujutsu (`jj`) for version-control operations; do not use Git.",
+    "- Before editing, inspect `jj status --no-pager` so you know whether unrelated working-copy changes already exist.",
+    "- Do not include unrelated changes or plan-file status updates in the task commit.",
+    "- If unrelated or plan-file changes are present, use a path/fileset-limited `jj commit` that includes only this task's changes, or report blocked if you cannot isolate them safely.",
+    `- After implementation and verification pass, create exactly one atomic Jujutsu commit for this task's changes before your final response (for example: \`jj commit -m ${JSON.stringify(`${task.id}: ${task.title}`)}\` when the working copy only contains this task's changes).`,
+    "- Only report `PLAN_TASK_RESULT: done` after the Jujutsu commit succeeds. If you cannot safely create an atomic commit, report `PLAN_TASK_RESULT: blocked` or `PLAN_TASK_RESULT: failed` and explain why.",
+    "- Read relevant files before editing and follow existing patterns.",
+    "- Run focused verification. If no useful automated check exists, explain the manual verification performed.",
+    "- If blocked, do not force changes. Explain the blocker.",
+    "- End your final response with exactly one marker line: PLAN_TASK_RESULT: done, PLAN_TASK_RESULT: failed, or PLAN_TASK_RESULT: blocked.",
+    "",
+    "Assigned task block:",
+    "",
+    task.block,
+    "",
+    "Full plan context:",
+    "",
+    truncateText(fullPlan, 30 * 1024, 1_000),
+  ].join("\n");
+}
+
+function classifyBuilderResult(result: AgentRunResult): { status: TaskStatus; marker?: string } {
+  if (isAgentErrored(result)) return { status: "failed" };
+
+  const marker = result.finalOutput.match(/PLAN_TASK_RESULT:\s*(done|failed|blocked)/i)?.[1]?.toLowerCase();
+  if (marker === "blocked") return { status: "blocked", marker };
+  if (marker === "failed") return { status: "failed", marker };
+  if (marker === "done") return { status: "done", marker };
+
+  return { status: "done" };
+}
+
+function taskDependenciesSatisfied(task: PlanTask, tasksById: Map<string, PlanTask>): boolean {
+  return task.dependsOn.every((dependencyId) => {
+    const dependency = tasksById.get(normalizeTaskId(dependencyId));
+    return !dependency || dependency.status === "done";
+  });
+}
+
+function taskBlockerReason(task: PlanTask, tasksById: Map<string, PlanTask>): string {
+  const blockers = task.dependsOn.filter((dependencyId) => {
+    const dependency = tasksById.get(normalizeTaskId(dependencyId));
+    return dependency && dependency.status !== "done";
+  });
+
+  if (blockers.length === 0) return "No runnable dependency path found.";
+  return `Waiting for dependencies: ${blockers.join(", ")}`;
+}
+
+function isDefaultRunnableStatus(status: string): boolean {
+  return status === "pending" || status === "failed" || status === "blocked";
+}
+
+function buildDetails(
+  planPath: string,
+  builderAgent: string,
+  maxConcurrency: number,
+  results: PlanBuildResult[],
+  skipped: PlanBuildDetails["skipped"],
+): PlanBuildDetails {
+  return {
+    path: planPath,
+    builderAgent,
+    maxConcurrency,
+    results: results.map((result) => ({
+      id: result.task.id,
+      title: result.task.title,
+      status: result.status,
+      exitCode: result.run.exitCode,
+      output: truncateText(result.run.finalOutput || result.run.stderr, 12 * 1024, 400),
+    })),
+    skipped,
+  };
+}
+
+async function buildPlanFile(
+  ctx: ExtensionContext,
+  params: {
+    path: string;
+    taskIds?: string[];
+    builderAgent?: string;
+    agentScope?: AgentScope;
+    maxConcurrency?: number;
+    confirmProjectAgents?: boolean;
+  },
+  signal?: AbortSignal,
+  onUpdate?: OnUpdateCallback<PlanBuildDetails>,
+): Promise<{ text: string; details: PlanBuildDetails }> {
+  const absolutePath = resolvePath(ctx.cwd, params.path);
+  const relativePath = displayPath(ctx.cwd, absolutePath);
+  const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
+  const agentScope = params.agentScope ?? "user";
+  const maxConcurrency = Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(params.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY)));
+  const discovery = discoverAgents(ctx.cwd, agentScope);
+  const agents = discovery.agents;
+  const targetIds = new Set((params.taskIds ?? []).map(normalizeTaskId));
+  const attempted = new Set<string>();
+  const results: PlanBuildResult[] = [];
+  const skipped: PlanBuildDetails["skipped"] = [];
+
+  findAgentOrThrow(agents, builderAgent);
+  await confirmProjectAgents(ctx, discovery, agents, agentScope, [builderAgent], params.confirmProjectAgents ?? true);
+
+  if (!fs.existsSync(absolutePath)) throw new Error(`Plan file not found: ${relativePath}`);
+
+  while (true) {
+    const content = await fs.promises.readFile(absolutePath, "utf8");
+    const tasks = parsePlanTasks(content);
+    if (tasks.length === 0) throw new Error(`No builder tasks found in ${relativePath}.`);
+
+    const tasksById = new Map(tasks.map((task) => [task.id, task]));
+    const candidates = tasks.filter((task) => {
+      if (attempted.has(task.id)) return false;
+      if (targetIds.size > 0) return targetIds.has(task.id) && task.status !== "done";
+      return isDefaultRunnableStatus(task.status);
+    });
+
+    const ready = candidates.filter((task) => taskDependenciesSatisfied(task, tasksById));
+    const blocked = candidates.filter((task) => !taskDependenciesSatisfied(task, tasksById));
+
+    if (ready.length === 0) {
+      for (const task of blocked) {
+        skipped.push({ id: task.id, title: task.title, reason: taskBlockerReason(task, tasksById) });
+      }
+      break;
+    }
+
+    onUpdate?.({
+      content: [
+        {
+          type: "text",
+          text: `Running ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} serially for atomic commits...`,
+        },
+      ],
+      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped),
+    });
+
+    const waveResults = await mapWithConcurrencyLimit(ready, maxConcurrency, async (task) => {
+      attempted.add(task.id);
+      await updatePlanTaskStatus(absolutePath, task.id, "in-progress");
+
+      const latestContent = await fs.promises.readFile(absolutePath, "utf8");
+      const latestTask = parsePlanTasks(latestContent).find((candidate) => candidate.id === task.id) ?? task;
+      const run = await runAgent(
+        ctx.cwd,
+        agents,
+        builderAgent,
+        createBuilderTask(relativePath, latestTask, latestContent),
+        signal,
+        (agentResult) => {
+          const status = agentResult.progressMessage
+            ? `${latestTask.id}: ${agentResult.progressMessage}`
+            : `${latestTask.id}: ${builderAgent} is running...`;
+
+          onUpdate?.({
+            content: [{ type: "text", text: status }],
+            details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped),
+          });
+        },
+      );
+      const classification = classifyBuilderResult(run);
+      const result: PlanBuildResult = { task: latestTask, run, status: classification.status, marker: classification.marker };
+
+      await updatePlanTaskStatus(absolutePath, task.id, classification.status, builderResultLog(result));
+      notifyPlannerBuilder(`Plan task ${latestTask.id} ${classification.status}: ${latestTask.title}`);
+      return result;
+    });
+
+    results.push(...waveResults);
+
+    onUpdate?.({
+      content: [
+        {
+          type: "text",
+          text: `Completed ${results.length} task${results.length === 1 ? "" : "s"} from ${relativePath}.`,
+        },
+      ],
+      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped),
+    });
+  }
+
+  if (targetIds.size > 0) {
+    const content = await fs.promises.readFile(absolutePath, "utf8");
+    const knownIds = new Set(parsePlanTasks(content).map((task) => task.id));
+    for (const targetId of targetIds) {
+      if (!knownIds.has(targetId)) skipped.push({ id: targetId, title: "Unknown task", reason: "Task id not found in plan file." });
+    }
+  }
+
+  const doneCount = results.filter((result) => result.status === "done").length;
+  const failedCount = results.filter((result) => result.status === "failed").length;
+  const blockedCount = results.filter((result) => result.status === "blocked").length;
+  const summaryLines = results.map((result) => `- ${result.task.id} ${result.status}: ${result.task.title}`);
+  const skippedLines = skipped.map((item) => `- ${item.id}: ${item.reason}`);
+  const text = [
+    `Plan build finished for ${relativePath}.`,
+    `Results: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped.`,
+    summaryLines.length ? `\nTasks:\n${summaryLines.join("\n")}` : "",
+    skippedLines.length ? `\nSkipped:\n${skippedLines.join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  notifyPlannerBuilder(
+    `Plan build finished for ${relativePath}: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped.`,
+  );
+  return { text, details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped) };
+}
+
+async function listPlanFiles(cwd: string, limit: number): Promise<Array<{ path: string; mtimeMs: number; taskCount: number }>> {
+  const planDir = path.resolve(cwd, DEFAULT_PLAN_DIR);
+  let entries: fs.Dirent[];
+
+  try {
+    entries = await fs.promises.readdir(planDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const plans = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+      .map(async (entry) => {
+        const absolutePath = path.join(planDir, entry.name);
+        const [stat, content] = await Promise.all([
+          fs.promises.stat(absolutePath),
+          fs.promises.readFile(absolutePath, "utf8").catch(() => ""),
+        ]);
+        return {
+          path: displayPath(cwd, absolutePath),
+          mtimeMs: stat.mtimeMs,
+          taskCount: parsePlanTasks(content).length,
+        };
+      }),
+  );
+
+  return plans.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, Math.max(1, limit));
+}
+
+async function latestPlanFile(cwd: string): Promise<string | undefined> {
+  const plans = await listPlanFiles(cwd, 1);
+  return plans[0]?.path;
+}
+
+function commandErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function notifyPlannerBuilder(message: string): void {
+  sendSystemNotification(truncateInline(message, 240), "Pi planner-builder");
+}
+
+async function notifyCommandError(ctx: ExtensionContext, error: unknown): Promise<void> {
+  const message = commandErrorMessage(error);
+  ctx.ui.notify(message, "error");
+  notifyPlannerBuilder(`Planner-builder failed: ${message}`);
+}
+
+function compactStatusText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 96) return normalized;
+  return `${normalized.slice(0, 93)}...`;
+}
+
+function statusTextFromUpdate<TDetails>(partial: ToolUpdate<TDetails>): string | undefined {
+  const text = partial.content
+    .map((item) => item.text)
+    .join(" ")
+    .trim();
+
+  return text ? compactStatusText(text) : undefined;
+}
+
+interface CommandProgressUpdateOptions {
+  log?: boolean;
+  forceLog?: boolean;
+}
+
+interface CommandProgressOptions {
+  onLog?: (text: string) => void;
+  logIntervalMs?: number;
+  maxLogEntries?: number;
+}
+
+interface CommandProgress {
+  update(text: string, options?: CommandProgressUpdateOptions): void;
+  log(text: string): void;
+  stop(): void;
+}
+
+function timestampForLog(date = new Date()): string {
+  return date.toISOString().slice(11, 19);
+}
+
+function sendCommandProgressMessage(pi: ExtensionAPI, ctx: ExtensionContext, command: string, text: string): void {
+  if (!ctx.isIdle()) {
+    ctx.ui.notify(`${command}: ${text}`, "info");
+    return;
+  }
+
+  pi.sendMessage({
+    customType: "planner-builder",
+    content: `\`${timestampForLog()}\` ${command}: ${text}`,
+    display: true,
+    details: { command, progress: true, status: text },
+  });
+}
+
+function startCommandProgress(ctx: ExtensionContext, key: string, initialText: string, options: CommandProgressOptions = {}): CommandProgress {
+  const startedAt = Date.now();
+  const logIntervalMs = options.logIntervalMs ?? COMMAND_LOG_MIN_INTERVAL_MS;
+  const maxLogEntries = options.maxLogEntries ?? COMMAND_LOG_MAX_ENTRIES;
+  let currentText = compactStatusText(initialText);
+  let lastLoggedText = "";
+  let lastLoggedAt = 0;
+  let logCount = 0;
+  let logLimitMessageShown = false;
+
+  const render = () => {
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1_000));
+    ctx.ui.setStatus(key, `${currentText} (${elapsedSeconds}s)`);
+  };
+
+  const emitLog = (text: string, force = false) => {
+    if (!options.onLog) return;
+
+    const compactText = compactStatusText(text);
+    if (!compactText || compactText === lastLoggedText) return;
+
+    const now = Date.now();
+    if (!force && now - lastLoggedAt < logIntervalMs) return;
+
+    if (logCount >= maxLogEntries) {
+      if (!logLimitMessageShown) {
+        logLimitMessageShown = true;
+        options.onLog("Progress log limit reached; continuing live updates in the status bar.");
+      }
+      return;
+    }
+
+    lastLoggedText = compactText;
+    if (!force) lastLoggedAt = now;
+    logCount++;
+    options.onLog(compactText);
+  };
+
+  render();
+  const timer = setInterval(render, 1_000);
+  timer.unref?.();
+
+  return {
+    update(text: string, updateOptions: CommandProgressUpdateOptions = {}) {
+      currentText = compactStatusText(text);
+      render();
+      if (updateOptions.log) emitLog(currentText, updateOptions.forceLog ?? false);
+    },
+    log(text: string) {
+      emitLog(text, true);
+    },
+    stop() {
+      clearInterval(timer);
+      ctx.ui.setStatus(key, undefined);
+    },
+  };
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.registerMessageRenderer("planner-builder", (message, _options, theme) => {
+    const details = message.details as { progress?: boolean } | undefined;
+    if (!details?.progress) return undefined as never;
+
+    const text =
+      typeof message.content === "string"
+        ? message.content
+        : message.content
+            .filter((item): item is TextContent => item?.type === "text" && typeof item.text === "string")
+            .map((item) => item.text)
+            .join("\n");
+
+    return new Text(theme.fg("dim", text), 1, 0);
+  });
+
+  pi.registerTool({
+    name: "plan_file_create",
+    label: "Create Plan File",
+    description: "Run the planner agent and save a structured plan file with builder task blocks.",
+    promptSnippet: "Run planner agent and write a multi-builder plan file under .pi/plans.",
+    promptGuidelines: [
+      "Use plan_file_create when the user asks to create a planner-generated plan file for builder agents.",
+      "Use plan_file_build after plan_file_create when the user asks multiple builder agents to implement plan tasks.",
+    ],
+    parameters: PlanCreateParams,
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const result = await createPlanFile(ctx, params, signal, onUpdate);
+        return { content: [{ type: "text", text: result.text }], details: result.details };
+      } catch (error) {
+        notifyPlannerBuilder(`Plan create failed: ${commandErrorMessage(error)}`);
+        throw error;
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "plan_file_build",
+    label: "Build Plan File",
+    description:
+      "Run builder agents for ready tasks in a planner-created plan file. Tasks run one at a time in dependency order so each completed task can create an atomic Jujutsu commit.",
+    promptSnippet: "Run builder agents against pending tasks in a planner-created plan file.",
+    promptGuidelines: [
+      "Use plan_file_build when the user asks builder agents to implement tasks from a plan file.",
+      "Use plan_file_build only after a plan file exists, usually from plan_file_create.",
+      "plan_file_build processes tasks serially and requires one atomic Jujutsu (jj) commit before a task can report done.",
+    ],
+    parameters: PlanBuildParams,
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      try {
+        const result = await buildPlanFile(ctx, params, signal, onUpdate);
+        return { content: [{ type: "text", text: result.text }], details: result.details };
+      } catch (error) {
+        notifyPlannerBuilder(`Plan build failed: ${commandErrorMessage(error)}`);
+        throw error;
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "plan_file_list",
+    label: "List Plan Files",
+    description: "List recent planner-builder plan files in .pi/plans.",
+    parameters: PlanListParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const plans = await listPlanFiles(ctx.cwd, Math.floor(params.limit ?? 10));
+      const text = plans.length
+        ? plans.map((plan) => `${plan.path} (${plan.taskCount} task${plan.taskCount === 1 ? "" : "s"})`).join("\n")
+        : `No plan files found in ${DEFAULT_PLAN_DIR}.`;
+      return { content: [{ type: "text", text }], details: { plans } };
+    },
+  });
+
+  pi.registerCommand("plan-create", {
+    description: "Run planner agent and create a plan file. Usage: /plan-create <request>",
+    handler: async (args, ctx) => {
+      const request = args.trim() || (ctx.hasUI ? await ctx.ui.editor("Plan request:", "") : undefined);
+      if (!request?.trim()) {
+        ctx.ui.notify("Usage: /plan-create <request>", "warning");
+        return;
+      }
+
+      const run = async () => {
+        let progress: ReturnType<typeof startCommandProgress> | undefined;
+
+        try {
+          progress = startCommandProgress(ctx, "planner-builder", ctx.isIdle() ? "planning..." : "waiting for current turn...", {
+            onLog: ctx.hasUI ? (text) => sendCommandProgressMessage(pi, ctx, "/plan-create", text) : undefined,
+          });
+
+          if (!ctx.isIdle()) {
+            ctx.ui.notify("/plan-create queued; waiting for the current turn to finish.", "info");
+            await ctx.waitForIdle();
+            progress.log("Current turn finished; starting planner agent.");
+          } else {
+            ctx.ui.notify("/plan-create started in the background.", "info");
+            progress.log("Started planner agent in the background.");
+          }
+
+          progress.update("planning...");
+          const result = await createPlanFile(ctx, { request }, undefined, (partial) => {
+            const statusText = statusTextFromUpdate(partial);
+            if (statusText) progress?.update(statusText, { log: true });
+          });
+          pi.sendMessage({ customType: "planner-builder", content: result.text, display: true, details: result.details });
+          ctx.ui.notify(result.text, "info");
+        } catch (error) {
+          const message = commandErrorMessage(error);
+          pi.sendMessage({
+            customType: "planner-builder",
+            content: `/plan-create failed.\n\n${message}`,
+            display: true,
+            details: { error: message },
+          });
+          await notifyCommandError(ctx, error);
+        } finally {
+          progress?.stop();
+        }
+      };
+
+      if (ctx.hasUI) {
+        void run();
+        return;
+      }
+
+      await run();
+    },
+  });
+
+  pi.registerCommand("plan-build", {
+    description: "Run builder agents for a plan file, committing each completed task with Jujutsu. Usage: /plan-build [plan-file] [T01,T02]",
+    handler: async (args, ctx) => {
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      let planPath = tokens.shift();
+      let taskIds = parseTaskIds(tokens.join(","));
+
+      if (planPath && /^T\d+/i.test(planPath)) {
+        taskIds = [planPath, ...taskIds];
+        planPath = undefined;
+      }
+
+      if (!planPath) planPath = await latestPlanFile(ctx.cwd);
+
+      if (!planPath) {
+        ctx.ui.notify(`Usage: /plan-build <plan-file> [T01,T02]. No files found in ${DEFAULT_PLAN_DIR}.`, "warning");
+        return;
+      }
+
+      const resolvedPlanPath = planPath;
+      const run = async () => {
+        let progress: ReturnType<typeof startCommandProgress> | undefined;
+
+        try {
+          progress = startCommandProgress(ctx, "planner-builder", ctx.isIdle() ? "building..." : "waiting for current turn...", {
+            onLog: ctx.hasUI ? (text) => sendCommandProgressMessage(pi, ctx, "/plan-build", text) : undefined,
+          });
+
+          if (!ctx.isIdle()) {
+            ctx.ui.notify("/plan-build queued; waiting for the current turn to finish.", "info");
+            await ctx.waitForIdle();
+            progress.log("Current turn finished; starting builder agents.");
+          } else {
+            ctx.ui.notify("/plan-build started in the background.", "info");
+            progress.log("Started builder agents in the background.");
+          }
+
+          progress.update("building...");
+          const result = await buildPlanFile(ctx, { path: resolvedPlanPath, taskIds }, undefined, (partial) => {
+            const statusText = statusTextFromUpdate(partial);
+            if (statusText) progress?.update(statusText, { log: true });
+          });
+          pi.sendMessage({ customType: "planner-builder", content: result.text, display: true, details: result.details });
+          ctx.ui.notify(`Plan build finished for ${resolvedPlanPath}.`, "info");
+        } catch (error) {
+          const message = commandErrorMessage(error);
+          pi.sendMessage({
+            customType: "planner-builder",
+            content: `/plan-build failed.\n\n${message}`,
+            display: true,
+            details: { error: message },
+          });
+          await notifyCommandError(ctx, error);
+        } finally {
+          progress?.stop();
+        }
+      };
+
+      if (ctx.hasUI) {
+        void run();
+        return;
+      }
+
+      await run();
+    },
+  });
+
+  pi.registerCommand("plan-list", {
+    description: "List recent planner-builder plan files.",
+    handler: async (_args, ctx) => {
+      const plans = await listPlanFiles(ctx.cwd, 10);
+      const text = plans.length
+        ? plans.map((plan) => `${plan.path} (${plan.taskCount} task${plan.taskCount === 1 ? "" : "s"})`).join("\n")
+        : `No plan files found in ${DEFAULT_PLAN_DIR}.`;
+      ctx.ui.notify(text, "info");
+    },
+  });
+
+  pi.on("before_agent_start", (event) => {
+    const activeTools = new Set(pi.getActiveTools());
+    if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
+
+    return {
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs tasks serially and instructs builders to create one atomic Jujutsu (jj) commit for each completed task.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable \"### Task TNN:\" blocks.`,
+    };
+  });
+}

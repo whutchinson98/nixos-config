@@ -1,0 +1,11 @@
+#+title: dotfiles.nix
+
+Nix flake for managing my dotfiles across my systems.
+
+* Olympus
+
+Desktop
+
+* Zephyr
+
+Laptop

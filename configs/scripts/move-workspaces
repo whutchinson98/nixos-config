@@ -1,0 +1,9 @@
+#!/bin/sh
+
+MONITOR=$(hyprctl monitors | grep -v "eDP-1" | grep "Monitor" | head -1 | awk '{print $2}')
+
+echo "Moving workspaces to $MONITOR"
+
+for i in {1..10}; do
+    hyprctl dispatch moveworkspacetomonitor $i $MONITOR
+done

@@ -1,0 +1,19 @@
+vim.o.number = true
+vim.o.relativenumber = true
+vim.o.signcolumn = 'yes'
+vim.o.tabstop = 2
+vim.o.shiftwidth = 2
+vim.o.expandtab = true
+vim.o.wrap = false
+vim.o.hlsearch = false
+vim.o.smartcase = true
+vim.o.ignorecase = true
+vim.o.mouse = 'nvi'
+vim.o.swapfile = true 
+vim.o.undofile = true
+local undodir = vim.fn.stdpath('state') .. '/undo'
+vim.fn.mkdir(undodir, 'p')
+vim.o.undodir = undodir .. '//'
+vim.o.colorcolumn = "80"
+vim.o.ignorecase = true
+vim.o.smartcase = true

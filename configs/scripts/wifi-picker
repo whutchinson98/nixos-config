@@ -1,0 +1,32 @@
+#!/bin/sh
+
+# Scan for networks and list them with signal strength
+# Format: "SIGNAL SSID" — deduped, sorted by signal strength
+networks=$(nmcli -t -f SIGNAL,SSID dev wifi list --rescan yes | \
+    awk -F: '$2 != "" && !seen[$2]++ {print $1 "% " $2}' | \
+    sort -rn)
+
+if [ -z "$networks" ]; then
+    notify-send "Wi-Fi" "No networks found"
+    exit 1
+fi
+
+# Show in fuzzel
+chosen=$(echo "$networks" | fuzzel --dmenu --prompt "Wi-Fi: ")
+
+if [ -z "$chosen" ]; then
+    exit 0
+fi
+
+# Extract SSID (everything after "NN% ")
+ssid=$(echo "$chosen" | sed 's/^[0-9]*% //')
+
+# Check if this is a known network
+if nmcli -t -f NAME connection show | grep -qx "$ssid"; then
+    nmcli connection up "$ssid" && \
+        notify-send "Wi-Fi" "Connected to $ssid" || \
+        notify-send "Wi-Fi" "Failed to connect to $ssid"
+else
+    # New network — fall back to nmtui for password entry
+    alacritty -e nmtui connect "$ssid"
+fi

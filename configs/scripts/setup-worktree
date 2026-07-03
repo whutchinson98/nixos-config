@@ -1,0 +1,4 @@
+#!/bin/sh
+
+# Command to setup git ref
+echo $(git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*")
