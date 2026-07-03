@@ -11,8 +11,11 @@
           "git@github.com:macro-inc/" = {
             insteadOf = "macro:";
           };
+          "git@github.com:whutchinson98/" = {
+            insteadOf = "gh:";
+          };
           "git@gitlab.com:hutchery/" = {
-            insteadOf = "me:";
+            insteadOf = "gl:";
           };
         };
         init = {
