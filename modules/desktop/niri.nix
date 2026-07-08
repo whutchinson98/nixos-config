@@ -19,7 +19,6 @@
         swaylock
         fuzzel
         xwayland-satellite
-        awww
         inputs.nirijump.packages.${pkgs.stdenv.hostPlatform.system}.default
       ];
 
@@ -76,13 +75,6 @@
           };
 
           spawn-at-startup = [
-            {
-              command = [
-                "sh"
-                "-c"
-                "awww-daemon && awww img $HOME/backgrounds/nord.png"
-              ];
-            }
             { command = [ "xwayland-satellite" ]; }
             { command = [ "lxqt-policykit-agent" ]; }
             { command = [ "1password" ]; }
@@ -125,6 +117,10 @@
             "05-misc" = {
               name = "misc";
             };
+          };
+
+          debug = {
+            honor-xdg-activation-with-invalid-serial = true;
           };
 
           window-rules = [
