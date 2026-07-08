@@ -75,11 +75,10 @@
           };
 
           spawn-at-startup = [
+            { command = [ "noctalia-shell" ]; }
             { command = [ "xwayland-satellite" ]; }
             { command = [ "lxqt-policykit-agent" ]; }
             { command = [ "1password" ]; }
-            # { command = [ "zen-beta" ]; }
-            # { command = [ "alacritty" ]; }
           ];
 
           environment = {
@@ -188,7 +187,14 @@
               "systemctl --user restart emacs.service"
             ];
             "Mod+T".action.spawn = [ "alacritty" ];
-            "Mod+P".action.spawn = [ "fuzzel" ];
+            # "Mod+P".action.spawn = [ "fuzzel" ];
+            "Mod+P".action.spawn = [
+              "noctalia-shell"
+              "ipc"
+              "call"
+              "launcher"
+              "toggle"
+            ];
             "Mod+N".action.spawn = [
               "alacritty"
               "--class"
