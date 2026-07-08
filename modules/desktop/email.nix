@@ -12,20 +12,20 @@
         gnutls
       ];
 
-      systemd.user.services.protonmail-bridge = {
-        Unit = {
-          Description = "Proton Mail Bridge";
-          After = [ "network-online.target" ];
-          Wants = [ "network-online.target" ];
-        };
+      # systemd.user.services.protonmail-bridge = {
+      #   Unit = {
+      #     Description = "Proton Mail Bridge";
+      #     After = [ "network-online.target" ];
+      #     Wants = [ "network-online.target" ];
+      #   };
 
-        Service = {
-          ExecStart = "${pkgs.protonmail-bridge}/bin/protonmail-bridge --noninteractive";
-          Restart = "on-failure";
-          RestartSec = 5;
-        };
+      #   Service = {
+      #     ExecStart = "${pkgs.protonmail-bridge}/bin/protonmail-bridge --noninteractive";
+      #     Restart = "on-failure";
+      #     RestartSec = 5;
+      #   };
 
-        Install.WantedBy = [ "default.target" ];
-      };
+      #   Install.WantedBy = [ "default.target" ];
+      # };
     };
 }
