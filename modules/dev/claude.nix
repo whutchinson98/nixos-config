@@ -7,7 +7,7 @@
   flake.modules.homeManager.dev =
     { config, lib, ... }:
     let
-      claudeConfigPath = "${config.home.homeDirectory}/dotfiles.nix/configs/claude";
+      claudeConfigPath = "${config.home.homeDirectory}/nixos-config/configs/claude";
       entries = builtins.attrNames (builtins.readDir ../../configs/claude);
     in
     {

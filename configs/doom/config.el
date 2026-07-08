@@ -154,7 +154,7 @@ has finished, then refresh the agenda buffer."
   (org-roam-db-autosync-mode))
 
 (after! projectile
-  (setq projectile-project-search-path '("~/d/" "~/dotfiles.nix")
+  (setq projectile-project-search-path '("~/d/" "~/nixos-config")
         projectile-auto-discover t
         projectile-track-known-projects-automatically nil))
 

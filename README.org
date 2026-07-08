@@ -1,4 +1,4 @@
-#+title: dotfiles.nix
+#+title: nixos-config
 
 Nix flake for managing my dotfiles across my systems.
 

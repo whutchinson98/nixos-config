@@ -222,7 +222,7 @@ Discover projects when using project-switching commands.
 
 #+begin_src emacs-lisp
 (after! projectile
-  (setq projectile-project-search-path '("~/d/" "~/dotfiles.nix")
+  (setq projectile-project-search-path '("~/d/" "~/nixos-config")
         projectile-auto-discover t
         projectile-track-known-projects-automatically nil))
 #+end_src

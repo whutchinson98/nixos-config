@@ -2,7 +2,7 @@
   flake.modules.homeManager.dev =
     { config, pkgs, ... }:
     let
-      doomConfigPath = "${config.home.homeDirectory}/dotfiles.nix/configs/doom";
+      doomConfigPath = "${config.home.homeDirectory}/nixos-config/configs/doom";
     in
     {
       programs.emacs = {
