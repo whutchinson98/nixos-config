@@ -37,6 +37,7 @@
 
       shellAliases = {
         jjw = "jj_workspace_add";
+        tm = "tmux_new_session";
       };
 
       loginShellInit = ''
@@ -110,6 +111,11 @@
           end
           set folder (basename (pwd))
           jj workspace add "../$folder-$workspace_name"
+        end
+
+        function tmux_new_session
+          set -l session_name (basename $PWD | tr '.' '_')
+          tmux new-session -A -s $session_name
         end
       '';
 
