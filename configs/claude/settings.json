@@ -66,6 +66,19 @@
       "Bash(systemctl:*)"
     ]
   },
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ input=$(cat); dir=$(printf '%s' \"$input\" | jq -r '.cwd // \"\" | split(\"/\") | last'); msg=$(printf '%s' \"$input\" | jq -r '.message // \"Claude needs your input\"'); if [ -n \"$TMUX\" ]; then msg=\"$msg (tmux: $(tmux display-message -p '#S'))\"; fi; notify-send -i \"$HOME/.claude/claude-icon.png\" \"Claude — ${dir:-session}\" \"$msg\"; } 2>/dev/null || true",
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
   "model": "claude-fable-5[1m]",
   "enabledPlugins": {
     "rust-analyzer-lsp@claude-plugins-official": true,
