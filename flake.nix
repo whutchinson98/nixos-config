@@ -22,10 +22,6 @@
       url = "git+https://gitlab.com/hutchery/nirijump";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    mako-tui = {
-      url = "git+https://codeberg.org/seanaye/mako-tui";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     claude-code-nix = {
       url = "github:whutchinson98/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";

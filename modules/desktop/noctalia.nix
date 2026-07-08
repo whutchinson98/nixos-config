@@ -22,6 +22,47 @@
               DP-1.path = "${config.home.homeDirectory}/backgrounds/nord.png";
             };
           };
+          shell = {
+            font_family = "GeistMono Nerd Font";
+            launch_apps_as_systemd_services = true;
+            niri_overview_type_to_launch_enabled = true;
+            polkit_agent = true;
+            panel = {
+              clipboard_placement = "attached";
+              transparency_mode = "glass";
+            };
+          };
+          notifications = {
+            enabled = true;
+            enableMarkdown = false;
+            density = "default";
+            monitors = [ ];
+            location = "top_right";
+            overlayLayer = true;
+            backgroundOpacity = 1;
+            respectExpireTimeout = false;
+            lowUrgencyDuration = 3;
+            normalUrgencyDuration = 8;
+            criticalUrgencyDuration = 15;
+            clearDismissed = true;
+            saveToHistory = {
+              low = true;
+              normal = true;
+              critical = true;
+            };
+            sounds = {
+              enabled = false;
+              volume = 0.5;
+              separateSounds = false;
+              criticalSoundFile = "";
+              normalSoundFile = "";
+              lowSoundFile = "";
+              excludedApps = "discord,firefox,chrome,chromium,edge";
+            };
+            enableMediaToast = false;
+            enableKeyboardLayoutToast = true;
+            enableBatteryToast = true;
+          };
 
           # configure noctalia here
           bar = {
@@ -58,6 +99,9 @@
                   id = "Clock";
                   useMonospacedFont = true;
                   usePrimaryColor = true;
+                }
+                {
+                  id = "Notifications";
                 }
               ];
             };

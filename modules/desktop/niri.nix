@@ -131,12 +131,6 @@
               default-window-height.fixed = 500;
             }
             {
-              matches = [ { app-id = "^mako-tui$"; } ];
-              open-floating = true;
-              default-column-width.fixed = 800;
-              default-window-height.fixed = 500;
-            }
-            {
               matches = [ { app-id = "Alacritty"; } ];
               open-on-workspace = "code";
             }
@@ -201,13 +195,6 @@
               "nirijump"
               "-e"
               "nirijump"
-            ];
-            "Mod+M".action.spawn = [
-              "alacritty"
-              "--class"
-              "mako-tui"
-              "-e"
-              "mako-tui"
             ];
             "Super+Alt+L".action.spawn = [ "swaylock" ];
             "Mod+Q".action.close-window = { };
