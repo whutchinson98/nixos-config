@@ -1,0 +1,17 @@
+{
+  "id": "proton-vpn",
+  "name": "Proton VPN",
+  "version": "1.0.0",
+  "author": "hutch",
+  "description": "Noctalia bar widget for Proton VPN status and connect/disconnect controls.",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "metadata": {
+    "displayMode": "alwaysShow",
+    "connectedColor": "primary",
+    "disconnectedColor": "none",
+    "iconColor": "none",
+    "textColor": "none"
+  }
+}

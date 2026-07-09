@@ -8,9 +8,30 @@
         inputs.noctalia.homeModules.default
       ];
 
+      xdg.configFile."noctalia/plugins/proton-vpn" = {
+        source = ../../configs/noctalia/plugins/proton-vpn;
+        recursive = true;
+      };
+
       # configure options
       programs.noctalia-shell = {
         enable = true;
+        plugins = {
+          version = 2;
+          sources = [
+            {
+              name = "Noctalia Plugins";
+              url = "https://github.com/noctalia-dev/noctalia-plugins";
+              enabled = true;
+            }
+          ];
+          states = {
+            "proton-vpn" = {
+              enabled = true;
+              sourceUrl = "local";
+            };
+          };
+        };
         settings = {
           wallpaper = {
             enabled = true;
@@ -104,6 +125,14 @@
                 }
                 {
                   id = "Network";
+                }
+                {
+                  id = "plugin:proton-vpn";
+                  displayMode = "alwaysShow";
+                  connectedColor = "primary";
+                  disconnectedColor = "none";
+                  iconColor = "none";
+                  textColor = "none";
                 }
               ];
               center = [
