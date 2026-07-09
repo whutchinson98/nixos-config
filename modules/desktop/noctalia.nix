@@ -1,7 +1,12 @@
 { inputs, ... }:
 {
   flake.modules.homeManager.desktop =
-    { config, ... }:
+    {
+      config,
+      lib,
+      pkgs,
+      ...
+    }:
     {
       # import the home manager module
       imports = [
@@ -11,27 +16,31 @@
       xdg.configFile."noctalia/plugins/proton-vpn" = {
         source = ../../configs/noctalia/plugins/proton-vpn;
         recursive = true;
+        force = true;
       };
+
+      home.activation.enableNoctaliaProtonVpnPlugin = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        plugins_file="${config.xdg.configHome}/noctalia/plugins.json"
+        mkdir -p "$(${pkgs.coreutils}/bin/dirname "$plugins_file")"
+
+        if [ -e "$plugins_file" ] && ${pkgs.jq}/bin/jq empty "$plugins_file" >/dev/null 2>&1; then
+          tmp="$(${pkgs.coreutils}/bin/mktemp)"
+          ${pkgs.jq}/bin/jq '
+            .version = 2
+            | .states = (.states // {})
+            | .sources = (if ((.sources // []) | length) == 0 then [{"name":"Noctalia Plugins","url":"https://github.com/noctalia-dev/noctalia-plugins","enabled":true}] else .sources end)
+            | .states["proton-vpn"] = ((.states["proton-vpn"] // {}) + {"enabled":true,"sourceUrl":"local"})
+          ' "$plugins_file" > "$tmp"
+          ${pkgs.coreutils}/bin/cat "$tmp" > "$plugins_file"
+          ${pkgs.coreutils}/bin/rm -f "$tmp"
+        else
+          ${pkgs.coreutils}/bin/printf '%s\n' '{"version":2,"sources":[{"name":"Noctalia Plugins","url":"https://github.com/noctalia-dev/noctalia-plugins","enabled":true}],"states":{"proton-vpn":{"enabled":true,"sourceUrl":"local"}}}' > "$plugins_file"
+        fi
+      '';
 
       # configure options
       programs.noctalia-shell = {
         enable = true;
-        plugins = {
-          version = 2;
-          sources = [
-            {
-              name = "Noctalia Plugins";
-              url = "https://github.com/noctalia-dev/noctalia-plugins";
-              enabled = true;
-            }
-          ];
-          states = {
-            "proton-vpn" = {
-              enabled = true;
-              sourceUrl = "local";
-            };
-          };
-        };
         settings = {
           wallpaper = {
             enabled = true;
