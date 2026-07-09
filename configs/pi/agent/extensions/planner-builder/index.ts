@@ -34,6 +34,14 @@ const MAX_CONCURRENCY = 8;
 const STDERR_TAIL_LIMIT = 20_000;
 const COMMAND_LOG_MIN_INTERVAL_MS = 1_500;
 const COMMAND_LOG_MAX_ENTRIES = 80;
+const DEFAULT_BUILDER_MONITOR_INTERVAL_SECONDS = 30;
+const DEFAULT_BUILDER_STUCK_TIMEOUT_SECONDS = 15 * 60;
+const DEFAULT_BUILDER_MAX_RESTARTS = 1;
+const MIN_BUILDER_MONITOR_INTERVAL_SECONDS = 5;
+const MIN_BUILDER_STUCK_TIMEOUT_SECONDS = 30;
+const MAX_BUILDER_MONITOR_INTERVAL_SECONDS = 60 * 60;
+const MAX_BUILDER_STUCK_TIMEOUT_SECONDS = 24 * 60 * 60;
+const MAX_BUILDER_RESTARTS = 5;
 
 type TextContent = { type: "text"; text: string };
 type TaskStatus = "pending" | "in-progress" | "done" | "failed" | "blocked";
@@ -50,6 +58,21 @@ interface UsageStats {
   turns: number;
 }
 
+interface BuilderMonitorConfig {
+  enabled: boolean;
+  intervalSeconds: number;
+  stuckTimeoutSeconds: number;
+  maxRestarts: number;
+}
+
+interface AgentRunAttemptSummary {
+  attempt: number;
+  exitCode: number;
+  stopReason?: string;
+  errorMessage?: string;
+  lastProgress?: string;
+}
+
 interface AgentRunResult {
   agent: string;
   agentSource: "user" | "project" | "unknown";
@@ -64,11 +87,16 @@ interface AgentRunResult {
   stopReason?: string;
   errorMessage?: string;
   progressMessage?: string;
+  restartCount?: number;
+  attempts?: AgentRunAttemptSummary[];
 }
 
 interface AgentRunOptions {
   model?: string;
   effort?: SelectedEffort;
+  monitor?: BuilderMonitorConfig;
+  attempt?: number;
+  maxAttempts?: number;
 }
 
 interface PlanTask {
@@ -129,6 +157,7 @@ interface PlanBuildDetails {
   builderAgent: string;
   verifierAgent: string;
   maxConcurrency: number;
+  monitor: BuilderMonitorConfig;
   results: Array<{
     id: string;
     title: string;
@@ -199,6 +228,36 @@ const PlanBuildParams = Type.Object({
       maximum: MAX_CONCURRENCY,
     }),
   ),
+  builderMonitor: Type.Optional(
+    Type.Boolean({
+      description: "Enable the builder watchdog that periodically checks child-agent progress and cancels stuck attempts. Default: true.",
+      default: true,
+    }),
+  ),
+  builderMonitorIntervalSeconds: Type.Optional(
+    Type.Number({
+      description: `How often the builder watchdog checks running builders. Default: ${DEFAULT_BUILDER_MONITOR_INTERVAL_SECONDS} seconds.`,
+      default: DEFAULT_BUILDER_MONITOR_INTERVAL_SECONDS,
+      minimum: MIN_BUILDER_MONITOR_INTERVAL_SECONDS,
+      maximum: MAX_BUILDER_MONITOR_INTERVAL_SECONDS,
+    }),
+  ),
+  builderStuckTimeoutSeconds: Type.Optional(
+    Type.Number({
+      description: `Cancel a builder attempt after this many seconds without child-agent output. Default: ${DEFAULT_BUILDER_STUCK_TIMEOUT_SECONDS} seconds.`,
+      default: DEFAULT_BUILDER_STUCK_TIMEOUT_SECONDS,
+      minimum: MIN_BUILDER_STUCK_TIMEOUT_SECONDS,
+      maximum: MAX_BUILDER_STUCK_TIMEOUT_SECONDS,
+    }),
+  ),
+  builderMaxRestarts: Type.Optional(
+    Type.Number({
+      description: `Maximum restarts per stuck builder task. Default: ${DEFAULT_BUILDER_MAX_RESTARTS}. Use 0 to cancel stuck runs without restarting.`,
+      default: DEFAULT_BUILDER_MAX_RESTARTS,
+      minimum: 0,
+      maximum: MAX_BUILDER_RESTARTS,
+    }),
+  ),
   confirmProjectAgents: Type.Optional(
     Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
   ),
@@ -207,6 +266,61 @@ const PlanBuildParams = Type.Object({
 const PlanListParams = Type.Object({
   limit: Type.Optional(Type.Number({ description: "Maximum number of plan files to list. Default: 10.", default: 10 })),
 });
+
+function defaultBuilderMonitorConfig(): BuilderMonitorConfig {
+  return {
+    enabled: true,
+    intervalSeconds: DEFAULT_BUILDER_MONITOR_INTERVAL_SECONDS,
+    stuckTimeoutSeconds: DEFAULT_BUILDER_STUCK_TIMEOUT_SECONDS,
+    maxRestarts: DEFAULT_BUILDER_MAX_RESTARTS,
+  };
+}
+
+function clampInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(value ?? fallback)));
+}
+
+function normalizeBuilderMonitorConfig(params: {
+  builderMonitor?: boolean;
+  builderMonitorIntervalSeconds?: number;
+  builderStuckTimeoutSeconds?: number;
+  builderMaxRestarts?: number;
+}): BuilderMonitorConfig {
+  const intervalSeconds = clampInteger(
+    params.builderMonitorIntervalSeconds,
+    DEFAULT_BUILDER_MONITOR_INTERVAL_SECONDS,
+    MIN_BUILDER_MONITOR_INTERVAL_SECONDS,
+    MAX_BUILDER_MONITOR_INTERVAL_SECONDS,
+  );
+  const stuckTimeoutSeconds = Math.max(
+    intervalSeconds,
+    clampInteger(
+      params.builderStuckTimeoutSeconds,
+      DEFAULT_BUILDER_STUCK_TIMEOUT_SECONDS,
+      MIN_BUILDER_STUCK_TIMEOUT_SECONDS,
+      MAX_BUILDER_STUCK_TIMEOUT_SECONDS,
+    ),
+  );
+
+  return {
+    enabled: params.builderMonitor ?? true,
+    intervalSeconds,
+    stuckTimeoutSeconds,
+    maxRestarts: clampInteger(params.builderMaxRestarts, DEFAULT_BUILDER_MAX_RESTARTS, 0, MAX_BUILDER_RESTARTS),
+  };
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
 
 function emptyUsage(): UsageStats {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
@@ -487,6 +601,10 @@ function builderResultLog(result: PlanBuildResult): string {
   const output = result.run.finalOutput || (isAgentErrored(result.run) ? summarizeFailure(result.run) : "(no output)");
   const model = result.run.model ? [`- Model: ${result.run.model}`] : [];
   const effort = result.run.effort ? [`- Effort: ${result.run.effort}`] : [];
+  const restarts = result.run.restartCount ? [`- Builder monitor restarts: ${result.run.restartCount}`] : [];
+  const attempts = result.run.attempts?.length && result.run.restartCount
+    ? [`- Attempts: ${result.run.attempts.map((attempt) => `#${attempt.attempt} ${attempt.stopReason ?? "exit"} (${attempt.exitCode})`).join(", ")}`]
+    : [];
   const workspace = result.workspacePath ? [`- Workspace: ${result.workspacePath}`] : [];
   const commit = result.commitId ? [`- Commit: ${result.commitId}`] : [];
   const integration = result.integrationMessage ? [`- Integration: ${result.integrationMessage}`] : [];
@@ -497,6 +615,8 @@ function builderResultLog(result: PlanBuildResult): string {
     `- Agent: ${result.run.agent}`,
     ...model,
     ...effort,
+    ...restarts,
+    ...attempts,
     ...workspace,
     ...commit,
     ...integration,
@@ -618,6 +738,21 @@ async function writeMaxEffortExtensionToTempFile(): Promise<{ dir: string; fileP
   return writeTempFile("pi-planner-builder-effort-", "max-effort.ts", maxEffortExtensionSource());
 }
 
+function signalSpawnedProcess(proc: ReturnType<typeof spawn>, signal: "SIGTERM" | "SIGKILL"): void {
+  if (proc.exitCode !== null) return;
+
+  if (process.platform !== "win32" && proc.pid) {
+    try {
+      process.kill(-proc.pid, signal);
+      return;
+    } catch {
+      // Fall back to signaling the direct child process.
+    }
+  }
+
+  proc.kill(signal);
+}
+
 async function runAgent(
   defaultCwd: string,
   agents: AgentConfig[],
@@ -630,6 +765,10 @@ async function runAgent(
   const agent = agents.find((candidate) => candidate.name === agentName);
   const model = options.model?.trim() || agent?.model;
   const thinkingLevel = options.effort === "max" ? "xhigh" : options.effort;
+  const attempt = options.attempt ?? 1;
+  const maxAttempts = Math.max(attempt, options.maxAttempts ?? attempt);
+  const progressAgentName = maxAttempts > 1 ? `${agentName} attempt ${attempt}/${maxAttempts}` : agentName;
+  const monitor = options.monitor?.enabled ? options.monitor : undefined;
   const result: AgentRunResult = {
     agent: agentName,
     agentSource: agent?.source ?? "unknown",
@@ -641,6 +780,7 @@ async function runAgent(
     usage: emptyUsage(),
     model,
     effort: options.effort,
+    restartCount: Math.max(0, attempt - 1),
   };
 
   if (!agent) {
@@ -678,13 +818,21 @@ async function runAgent(
     args.push(`Task: ${task}`);
 
     let stdoutBuffer = "";
-    let wasAborted = false;
+    let terminationReason: "aborted" | "stuck" | undefined;
     let abortCleanup: (() => void) | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let monitorTimer: ReturnType<typeof setInterval> | undefined;
     let lastOutputUpdateAt = 0;
+    let lastActivityAt = Date.now();
+    let lastProgress = `${progressAgentName} process spawned.`;
     let assistantDraft = "";
 
-    const emitOutput = (force = false) => {
+    const emitOutput = (force = false, childActivity = false) => {
+      if (childActivity) {
+        lastActivityAt = Date.now();
+        if (result.progressMessage) lastProgress = result.progressMessage;
+      }
+
       if (!onOutput) return;
 
       const now = Date.now();
@@ -700,6 +848,7 @@ async function runAgent(
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        detached: process.platform !== "win32",
         env: {
           ...process.env,
           PI_SUBAGENT: "1",
@@ -716,16 +865,17 @@ async function runAgent(
         } catch {
           return;
         }
+        lastActivityAt = Date.now();
 
         if (event.type === "agent_start") {
-          result.progressMessage = `${agent.name} started.`;
-          emitOutput(true);
+          result.progressMessage = `${progressAgentName} started.`;
+          emitOutput(true, true);
           return;
         }
 
         if (event.type === "turn_start") {
-          result.progressMessage = `${agent.name} is thinking...`;
-          emitOutput(true);
+          result.progressMessage = `${progressAgentName} is thinking...`;
+          emitOutput(true, true);
           return;
         }
 
@@ -743,39 +893,39 @@ async function runAgent(
 
           const text = assistantDraft || delta;
           result.progressMessage = text
-            ? `${agent.name} is writing: ${truncateInlineTail(text, 80)}`
-            : `${agent.name} is writing...`;
-          emitOutput();
+            ? `${progressAgentName} is writing: ${truncateInlineTail(text, 80)}`
+            : `${progressAgentName} is writing...`;
+          emitOutput(false, true);
           return;
         }
 
         if (event.type === "tool_execution_start") {
-          result.progressMessage = `${agent.name} is running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
-          emitOutput(true);
+          result.progressMessage = `${progressAgentName} is running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
+          emitOutput(true, true);
           return;
         }
 
         if (event.type === "tool_execution_update") {
-          result.progressMessage = `${agent.name} is still running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
-          emitOutput();
+          result.progressMessage = `${progressAgentName} is still running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
+          emitOutput(false, true);
           return;
         }
 
         if (event.type === "tool_execution_end") {
-          result.progressMessage = `${agent.name} ${event.isError ? "failed" : "finished"} ${event.toolName ?? "tool"}.`;
-          emitOutput(true);
+          result.progressMessage = `${progressAgentName} ${event.isError ? "failed" : "finished"} ${event.toolName ?? "tool"}.`;
+          emitOutput(true, true);
           return;
         }
 
         if (event.type === "auto_retry_start") {
-          result.progressMessage = `${agent.name} retrying after error: ${truncateInline(event.errorMessage ?? "unknown error", 80)}`;
-          emitOutput(true);
+          result.progressMessage = `${progressAgentName} retrying after error: ${truncateInline(event.errorMessage ?? "unknown error", 80)}`;
+          emitOutput(true, true);
           return;
         }
 
         if (event.type === "compaction_start") {
-          result.progressMessage = `${agent.name} is compacting context...`;
-          emitOutput(true);
+          result.progressMessage = `${progressAgentName} is compacting context...`;
+          emitOutput(true, true);
           return;
         }
 
@@ -784,8 +934,8 @@ async function runAgent(
           messages.push(message);
           updateUsageFromMessage(result, message);
           result.finalOutput = finalAssistantOutput(messages);
-          result.progressMessage = result.finalOutput ? `${agent.name} output received.` : `${agent.name} completed a message.`;
-          emitOutput(true);
+          result.progressMessage = result.finalOutput ? `${progressAgentName} output received.` : `${progressAgentName} completed a message.`;
+          emitOutput(true, true);
           return;
         }
 
@@ -795,8 +945,8 @@ async function runAgent(
             updateUsageFromMessage(result, message);
           }
           result.finalOutput = finalAssistantOutput(messages);
-          result.progressMessage = result.finalOutput ? `${agent.name} output received.` : `${agent.name} finished.`;
-          emitOutput(true);
+          result.progressMessage = result.finalOutput ? `${progressAgentName} output received.` : `${progressAgentName} finished.`;
+          emitOutput(true, true);
         }
       };
 
@@ -818,45 +968,69 @@ async function runAgent(
           .filter(Boolean)
           .pop();
         if (lastLine) {
-          result.progressMessage = `${agent.name} stderr: ${truncateInline(lastLine, 90)}`;
-          emitOutput();
+          result.progressMessage = `${progressAgentName} stderr: ${truncateInline(lastLine, 90)}`;
+          emitOutput(false, true);
         }
       });
 
       proc.on("error", (error) => {
         result.stderr = appendStderrTail(result.stderr, `${error.message}\n`);
-        result.progressMessage = `${agent.name} process error: ${truncateInline(error.message, 90)}`;
-        emitOutput(true);
+        result.progressMessage = `${progressAgentName} process error: ${truncateInline(error.message, 90)}`;
+        emitOutput(true, true);
         resolve(1);
       });
 
       proc.on("close", (code) => {
         if (stdoutBuffer.trim()) processLine(stdoutBuffer);
         if (killTimer) clearTimeout(killTimer);
+        if (monitorTimer) clearInterval(monitorTimer);
         abortCleanup?.();
         resolve(code ?? 0);
       });
 
-      const killProcess = () => {
-        wasAborted = true;
-        proc.kill("SIGTERM");
+      const killProcess = (reason: "aborted" | "stuck") => {
+        if (terminationReason) return;
+        terminationReason = reason;
+        result.progressMessage =
+          reason === "stuck"
+            ? `${progressAgentName} had no child-agent output for ${formatDuration(Date.now() - lastActivityAt)}; cancelling attempt.`
+            : `${progressAgentName} was aborted; cancelling attempt.`;
+        emitOutput(true);
+        signalSpawnedProcess(proc, "SIGTERM");
         killTimer = setTimeout(() => {
-          if (proc.exitCode === null) proc.kill("SIGKILL");
+          signalSpawnedProcess(proc, "SIGKILL");
         }, 5_000);
         killTimer.unref?.();
       };
 
+      if (monitor) {
+        monitorTimer = setInterval(() => {
+          const idleMilliseconds = Date.now() - lastActivityAt;
+          const idleFor = formatDuration(idleMilliseconds);
+          result.progressMessage = `${progressAgentName} monitor: last child-agent output ${idleFor} ago; last status: ${truncateInline(lastProgress, 90)}`;
+          emitOutput(true);
+
+          if (idleMilliseconds >= monitor.stuckTimeoutSeconds * 1_000) killProcess("stuck");
+        }, monitor.intervalSeconds * 1_000);
+        monitorTimer.unref?.();
+      }
+
       if (signal?.aborted) {
-        killProcess();
+        killProcess("aborted");
       } else if (signal) {
-        signal.addEventListener("abort", killProcess, { once: true });
-        abortCleanup = () => signal.removeEventListener("abort", killProcess);
+        const abortHandler = () => killProcess("aborted");
+        signal.addEventListener("abort", abortHandler, { once: true });
+        abortCleanup = () => signal.removeEventListener("abort", abortHandler);
       }
     });
 
-    if (wasAborted) {
+    if (terminationReason === "aborted") {
       result.stopReason = "aborted";
       result.errorMessage = "Agent run was aborted.";
+    } else if (terminationReason === "stuck") {
+      result.stopReason = "stuck";
+      result.errorMessage = `Agent run was cancelled by the builder monitor after ${monitor?.stuckTimeoutSeconds ?? 0} seconds without child-agent output.`;
+      if (result.exitCode === 0) result.exitCode = 124;
     }
 
     return result;
@@ -871,6 +1045,56 @@ async function runAgent(
       }
     }
   }
+}
+
+function summarizeAgentAttempt(result: AgentRunResult, attempt: number): AgentRunAttemptSummary {
+  return {
+    attempt,
+    exitCode: result.exitCode,
+    stopReason: result.stopReason,
+    errorMessage: result.errorMessage,
+    lastProgress: result.progressMessage,
+  };
+}
+
+async function runAgentWithRestarts(
+  defaultCwd: string,
+  agents: AgentConfig[],
+  agentName: string,
+  task: string,
+  options: AgentRunOptions,
+  signal: AbortSignal | undefined,
+  onOutput?: (result: AgentRunResult) => void,
+): Promise<AgentRunResult> {
+  const maxRestarts = options.monitor?.enabled ? options.monitor.maxRestarts : 0;
+  const maxAttempts = maxRestarts + 1;
+  const attempts: AgentRunAttemptSummary[] = [];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const result = await runAgent(
+      defaultCwd,
+      agents,
+      agentName,
+      task,
+      { ...options, attempt, maxAttempts },
+      signal,
+      onOutput,
+    );
+    attempts.push(summarizeAgentAttempt(result, attempt));
+
+    const shouldRestart = result.stopReason === "stuck" && !signal?.aborted && attempt < maxAttempts;
+    if (!shouldRestart) {
+      result.attempts = attempts;
+      result.restartCount = attempt - 1;
+      return result;
+    }
+
+    result.progressMessage = `${agentName} monitor: restarting after stuck attempt ${attempt}/${maxAttempts}; next attempt ${attempt + 1}/${maxAttempts}.`;
+    notifyPlannerBuilder(result.progressMessage);
+    onOutput?.(result);
+  }
+
+  throw new Error(`Internal error: ${agentName} restart loop exited without a result.`);
 }
 
 function findAgentOrThrow(agents: AgentConfig[], agentName: string): AgentConfig {
@@ -1021,6 +1245,7 @@ function createBuilderTask(planPath: string, task: PlanTask, fullPlan: string): 
     "- Avoid unrelated refactors and unrelated files.",
     "- Use Jujutsu (`jj`) for version-control operations; do not use Git.",
     "- Before editing, inspect `jj status --no-pager` so you know the task workspace state.",
+    "- If this task was restarted by the builder monitor, continue from the existing workspace state; inspect prior changes and avoid duplicate commits.",
     `- After implementation and verification pass, create exactly one atomic Jujutsu commit for this task's changes before your final response (for example: \`jj commit -m ${JSON.stringify(`${task.id}: ${task.title}`)}\`).`,
     "- Leave the task workspace with a clean/empty working-copy commit after that task commit; do not make extra edits after committing.",
     "- The main planner-builder loop will rebase/integrate your task commit on top of the main workspace after you finish.",
@@ -1103,12 +1328,14 @@ function buildDetails(
   skipped: PlanBuildDetails["skipped"],
   verifierAgent = DEFAULT_VERIFIER_AGENT,
   verifierRun?: AgentRunResult,
+  monitor: BuilderMonitorConfig = defaultBuilderMonitorConfig(),
 ): PlanBuildDetails {
   return {
     path: planPath,
     builderAgent,
     verifierAgent,
     maxConcurrency,
+    monitor,
     results: results.map((result) => ({
       id: result.task.id,
       title: result.task.title,
@@ -1445,6 +1672,10 @@ async function buildPlanFile(
     verifierAgent?: string;
     agentScope?: AgentScope;
     maxConcurrency?: number;
+    builderMonitor?: boolean;
+    builderMonitorIntervalSeconds?: number;
+    builderStuckTimeoutSeconds?: number;
+    builderMaxRestarts?: number;
     confirmProjectAgents?: boolean;
     effort?: SelectedEffort;
   },
@@ -1458,6 +1689,7 @@ async function buildPlanFile(
   const effort = params.effort ?? "off";
   const agentScope = params.agentScope ?? "user";
   const maxConcurrency = Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(params.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY)));
+  const monitor = normalizeBuilderMonitorConfig(params);
   const discovery = discoverAgents(ctx.cwd, agentScope);
   const agents = discovery.agents;
   const targetIds = new Set((params.taskIds ?? []).map(normalizeTaskId));
@@ -1465,6 +1697,11 @@ async function buildPlanFile(
   const results: PlanBuildResult[] = [];
   const skipped: PlanBuildDetails["skipped"] = [];
   let verifierRun: AgentRunResult | undefined;
+  const detailsFor = (currentVerifierRun = verifierRun) =>
+    buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, currentVerifierRun, monitor);
+  const monitorSummary = monitor.enabled
+    ? `builder monitor checks every ${monitor.intervalSeconds}s; stuck timeout ${monitor.stuckTimeoutSeconds}s; max restarts ${monitor.maxRestarts}`
+    : "builder monitor disabled";
 
   findAgentOrThrow(agents, builderAgent);
   findAgentOrThrow(agents, verifierAgent);
@@ -1512,10 +1749,10 @@ async function buildPlanFile(
       content: [
         {
           type: "text",
-          text: `Running ${batch.length} of ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) in parallel workspaces...`,
+          text: `Running ${batch.length} of ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) in parallel workspaces; ${monitorSummary}...`,
         },
       ],
-      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+      details: detailsFor(),
     });
 
     const launches: Array<{
@@ -1540,12 +1777,12 @@ async function buildPlanFile(
 
     const runLaunch = async (launch: (typeof launches)[number]): Promise<TaskRunContext> => {
       try {
-        const run = await runAgent(
+        const run = await runAgentWithRestarts(
           launch.workspace.cwd,
           agents,
           builderAgent,
           launch.prompt,
-          { model: PLAN_BUILD_MODEL, effort },
+          { model: PLAN_BUILD_MODEL, effort, monitor },
           signal,
           (agentResult) => {
             const status = agentResult.progressMessage
@@ -1554,7 +1791,7 @@ async function buildPlanFile(
 
             onUpdate?.({
               content: [{ type: "text", text: status }],
-              details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+              details: detailsFor(),
             });
           },
         );
@@ -1607,7 +1844,7 @@ async function buildPlanFile(
             text: `${completed.taskRun.task.id} ${finalized.result.status}; latest integrated head is ${integratedHead}.`,
           },
         ],
-        details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+        details: detailsFor(),
       });
     }
 
@@ -1618,7 +1855,7 @@ async function buildPlanFile(
           text: `Completed ${results.length} task${results.length === 1 ? "" : "s"} from ${relativePath}; latest integrated head is ${integratedHead}.`,
         },
       ],
-      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+      details: detailsFor(),
     });
 
     if (signal?.aborted) break;
@@ -1639,7 +1876,7 @@ async function buildPlanFile(
 
   onUpdate?.({
     content: [{ type: "text", text: `Running ${verifierAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) to verify completed plan build...` }],
-    details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+    details: detailsFor(),
   });
 
   verifierRun = await runAgent(
@@ -1656,7 +1893,7 @@ async function buildPlanFile(
 
       onUpdate?.({
         content: [{ type: "text", text: status }],
-        details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, agentResult),
+        details: detailsFor(agentResult),
       });
     },
   );
@@ -1699,7 +1936,7 @@ async function buildPlanFile(
   notifyPlannerBuilder(
     `Plan build finished for ${relativePath}: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped; verifier ${verifierRun && !isAgentErrored(verifierRun) ? "done" : "failed"}.`,
   );
-  return { text, details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun) };
+  return { text, details: detailsFor() };
 }
 
 async function listPlanFiles(cwd: string, limit: number): Promise<Array<{ path: string; mtimeMs: number; taskCount: number }>> {
@@ -1928,12 +2165,12 @@ export default function (pi: ExtensionAPI) {
     name: "plan_file_build",
     label: "Build Plan File",
     description:
-      "Run builder agents on gpt-5.5 with the selected effort for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces, are integrated serially onto the main workspace, and then the verifier agent writes .pi/outputs/findings.html.",
-    promptSnippet: "Run builder agents on gpt-5.5 with the selected effort against pending tasks, then run verifier to write .pi/outputs/findings.html.",
+      "Run builder agents on gpt-5.5 with the selected effort for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces under a builder watchdog that cancels/restarts stuck attempts, are integrated serially onto the main workspace, and then the verifier agent writes .pi/outputs/findings.html.",
+    promptSnippet: "Run builder agents on gpt-5.5 with watchdog monitoring against pending tasks, then run verifier to write .pi/outputs/findings.html.",
     promptGuidelines: [
       "Use plan_file_build when the user asks builder agents to implement tasks from a plan file.",
       "Use plan_file_build only after a plan file exists, usually from plan_file_create.",
-      "plan_file_build runs independent tasks in separate Jujutsu workspaces, requires one atomic Jujutsu (jj) commit per task, integrates completed commits serially, and runs verifier at the end.",
+      "plan_file_build runs independent tasks in separate Jujutsu workspaces, watches builder status output, cancels/restarts stuck builder attempts, requires one atomic Jujutsu (jj) commit per task, integrates completed commits serially, and runs verifier at the end.",
     ],
     parameters: PlanBuildParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -2018,7 +2255,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-build", {
-    description: "Run builder agents on gpt-5.5 with the selected effort in parallel Jujutsu workspaces, integrate commits, then run verifier. Usage: /plan-build [plan-file] [T01,T02]",
+    description: "Run builder agents on gpt-5.5 with the selected effort in monitored parallel Jujutsu workspaces, integrate commits, then run verifier. Usage: /plan-build [plan-file] [T01,T02]",
     handler: async (args, ctx) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       let planPath = tokens.shift();
@@ -2100,7 +2337,7 @@ export default function (pi: ExtensionAPI) {
     if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces, requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable \"### Task TNN:\" blocks.`,
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable \"### Task TNN:\" blocks.`,
     };
   });
 }
