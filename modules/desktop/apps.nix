@@ -1,9 +1,10 @@
 # Desktop GUI applications
-{
+{ inputs, ... }: {
   flake.modules.homeManager.desktop =
     { pkgs, ... }:
     {
       home.packages = with pkgs; [
+        inputs.macro.packages.${pkgs.system}.tauri-desktop
         notify
         signal-desktop
         bruno
