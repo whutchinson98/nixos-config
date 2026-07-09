@@ -16,6 +16,14 @@ extensions/
 
 Extension files should default-export a function that receives `ExtensionAPI`.
 
+## Workspace initialization
+
+`initialize-workspace.ts` runs on Pi session startup. It searches from the session cwd up to the nearest `flake.nix`; when found on NixOS with `direnv` installed, it ensures `.envrc` contains `use flake` and `watch_file nix/*.nix`, then runs `direnv allow` from the flake root.
+
+Spawned agents set `PI_SUBAGENT=1`. When this extension sees that environment variable and `nix` is available, it overrides only that subprocess's `bash` tool so bash commands run through `nix develop <flake-root> -c bash -lc ...`. The main Pi process still uses its normal bash tool.
+
+Builder agents opt in to loading extensions so this startup hook and subagent-only bash wrapper run inside spawned builder subprocesses.
+
 ## Subagents
 
 `subagent/` registers:
@@ -25,7 +33,7 @@ Extension files should default-export a function that receives `ExtensionAPI`.
 | `agent_list` | List agents discovered from `~/.pi/agent/agents` and, when requested, trusted project `.pi/agents` directories. |
 | `subagent` | Spawn one or more agents in isolated `pi --mode json --no-session` subprocesses. |
 
-Subagent subprocesses use `--no-extensions` by default; pass `includeExtensions: true` to the tool only when a delegated agent needs extension-provided tools.
+Subagent subprocesses use `--no-extensions` by default unless an agent frontmatter sets `includeExtensions: true`; pass `includeExtensions` to the tool to override that behavior for a specific call.
 
 It also registers `/agents [user|project|both]` for interactive discovery.
 

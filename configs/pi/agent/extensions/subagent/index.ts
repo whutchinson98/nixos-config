@@ -83,8 +83,8 @@ const SubagentParams = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Working directory for the single-agent process. Relative paths resolve from pi's cwd." })),
   includeExtensions: Type.Optional(
     Type.Boolean({
-      description: "Load configured extensions inside subagent subprocesses. Default: false to avoid recursive agents and extension side effects.",
-      default: false,
+      description:
+        "Load configured extensions inside subagent subprocesses. If omitted, uses the agent's includeExtensions frontmatter value, otherwise false.",
     }),
   ),
 });
@@ -313,6 +313,11 @@ async function runSingleAgent(
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        env: {
+          ...process.env,
+          PI_SUBAGENT: "1",
+          PI_SUBAGENT_NAME: agent.name,
+        },
       });
 
       const processLine = (line: string) => {
@@ -412,6 +417,11 @@ function requestedAgentNames(params: { agent?: string; tasks?: Array<{ agent: st
   return names;
 }
 
+function shouldIncludeExtensions(agents: AgentConfig[], agentName: string, override: boolean | undefined): boolean {
+  if (override !== undefined) return override;
+  return agents.find((agent) => agent.name === agentName)?.includeExtensions ?? false;
+}
+
 function publicAgent(agent: AgentConfig): Omit<AgentConfig, "systemPrompt"> {
   const { systemPrompt: _systemPrompt, ...publicFields } = agent;
   return publicFields;
@@ -467,7 +477,7 @@ export default function (pi: ExtensionAPI) {
       "Use single mode with agent + task, parallel mode with tasks, or chain mode with sequential steps and {previous} placeholders.",
       'Default agentScope is "user", which loads ~/.pi/agent/agents.',
       'Only set agentScope to "project" or "both" for trusted repositories or when the user explicitly asks for project-local agents.',
-      "Subagent subprocesses disable extensions by default to avoid recursive agents and extension side effects.",
+      "Subagent subprocesses disable extensions by default to avoid recursive agents and extension side effects, unless an agent opts in with includeExtensions frontmatter or the tool call passes includeExtensions.",
     ].join(" "),
     promptSnippet: "Delegate work to specialized pi agents from ~/.pi/agent/agents using isolated pi subprocesses.",
     promptGuidelines: [
@@ -555,7 +565,7 @@ export default function (pi: ExtensionAPI) {
             task,
             step.cwd,
             index + 1,
-            params.includeExtensions ?? false,
+            shouldIncludeExtensions(agents, step.agent, params.includeExtensions),
             signal,
             update,
             makeDetails,
@@ -620,7 +630,7 @@ export default function (pi: ExtensionAPI) {
             task.task,
             task.cwd,
             undefined,
-            params.includeExtensions ?? false,
+            shouldIncludeExtensions(agents, task.agent, params.includeExtensions),
             signal,
             (partial) => {
               const current = partial.details.results[0];
@@ -662,7 +672,7 @@ export default function (pi: ExtensionAPI) {
           params.task,
           params.cwd,
           undefined,
-          params.includeExtensions ?? false,
+          shouldIncludeExtensions(agents, params.agent, params.includeExtensions),
           signal,
           onUpdate,
           makeDetails,

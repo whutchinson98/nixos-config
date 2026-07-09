@@ -652,7 +652,8 @@ async function runAgent(
     };
   }
 
-  const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
+  const args = ["--mode", "json", "-p", "--no-session"];
+  if (!agent.includeExtensions) args.push("--no-extensions");
   if (model) args.push("--model", model);
   if (thinkingLevel) args.push("--thinking", thinkingLevel);
   if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
@@ -699,6 +700,11 @@ async function runAgent(
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        env: {
+          ...process.env,
+          PI_SUBAGENT: "1",
+          PI_SUBAGENT_NAME: agent.name,
+        },
       });
 
       const processLine = (line: string) => {

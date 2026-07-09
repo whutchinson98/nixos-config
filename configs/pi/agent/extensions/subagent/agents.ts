@@ -9,6 +9,7 @@ export interface AgentConfig {
   description: string;
   tools?: string[];
   model?: string;
+  includeExtensions?: boolean;
   systemPrompt: string;
   source: "user" | "project";
   filePath: string;
@@ -25,6 +26,11 @@ type AgentFrontmatter = Record<string, unknown>;
 function getString(frontmatter: AgentFrontmatter, key: string): string | undefined {
   const value = frontmatter[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function getBoolean(frontmatter: AgentFrontmatter, key: string): boolean | undefined {
+  const value = frontmatter[key];
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function getTools(frontmatter: AgentFrontmatter): string[] | undefined {
@@ -84,6 +90,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
       description,
       tools: getTools(frontmatter),
       model: getString(frontmatter, "model"),
+      includeExtensions: getBoolean(frontmatter, "includeExtensions"),
       systemPrompt: body,
       source,
       filePath,
@@ -139,7 +146,8 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 export function formatAgent(agent: AgentConfig): string {
   const tools = agent.tools?.length ? agent.tools.join(",") : "default";
   const model = agent.model ? `, model: ${agent.model}` : "";
-  return `${agent.name} (${agent.source}): ${agent.description} [tools: ${tools}${model}]`;
+  const extensions = agent.includeExtensions ? ", extensions: enabled" : "";
+  return `${agent.name} (${agent.source}): ${agent.description} [tools: ${tools}${model}${extensions}]`;
 }
 
 export function formatAgentList(agents: AgentConfig[], maxItems = 20): string {
