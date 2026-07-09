@@ -4,15 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum, Type } from "@mariozechner/pi-ai";
-import { Text } from "@mariozechner/pi-tui";
 import {
-  formatSize,
-  truncateHead,
   type ExtensionAPI,
   type ExtensionContext,
+  formatSize,
+  truncateHead,
+  truncateTail,
   withFileMutationQueue,
 } from "@mariozechner/pi-coding-agent";
-import { notify as sendSystemNotification } from "../system-notify";
+import { Text } from "@mariozechner/pi-tui";
 import {
   type AgentConfig,
   type AgentDiscoveryResult,
@@ -20,6 +20,16 @@ import {
   discoverAgents,
   formatAgentList,
 } from "../subagent/agents";
+import { notify as sendSystemNotification } from "../system-notify";
+import {
+  hidePlanBuildDashboard,
+  isPlanBuildDetails,
+  type PlanBuildAgentDetails,
+  PlanBuildDashboard,
+  type PlanBuildDashboardData,
+  renderPlanBuildDetails,
+  showPlanBuildDashboard,
+} from "./dashboard";
 
 const DEFAULT_PLANNER_AGENT = "planner";
 const DEFAULT_BUILDER_AGENT = "builder";
@@ -80,6 +90,7 @@ interface AgentRunResult {
   cwd: string;
   exitCode: number;
   finalOutput: string;
+  liveOutput?: string;
   stderr: string;
   usage: UsageStats;
   model?: string;
@@ -97,6 +108,17 @@ interface AgentRunOptions {
   monitor?: BuilderMonitorConfig;
   attempt?: number;
   maxAttempts?: number;
+}
+
+interface AgentProcessEvent {
+  type?: string;
+  message?: Message;
+  messages?: Message[];
+  assistantMessageEvent?: { delta?: unknown };
+  toolName?: string;
+  args?: unknown;
+  isError?: boolean;
+  errorMessage?: string;
 }
 
 interface PlanTask {
@@ -152,8 +174,7 @@ interface TaskCommitInfo {
   changeId: string;
 }
 
-interface PlanBuildDetails {
-  path: string;
+interface PlanBuildDetails extends PlanBuildDashboardData {
   builderAgent: string;
   verifierAgent: string;
   maxConcurrency: number;
@@ -341,6 +362,15 @@ function truncateText(text: string, maxBytes = 50 * 1024, maxLines = 2_000): str
   )} of ${formatSize(truncation.totalBytes)}).]`;
 }
 
+function truncateTextTail(text: string, maxBytes = 12 * 1024, maxLines = 400): string {
+  const truncation = truncateTail(text, { maxBytes, maxLines });
+  if (!truncation.truncated) return truncation.content;
+
+  return `[Earlier output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(
+    truncation.outputBytes,
+  )} of ${formatSize(truncation.totalBytes)}).]\n\n${truncation.content}`;
+}
+
 function truncateInline(text: string, maxLength = 120): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLength) return normalized;
@@ -429,6 +459,13 @@ function isAgentErrored(result: AgentRunResult): boolean {
 
 function summarizeFailure(result: AgentRunResult): string {
   return result.errorMessage || result.stderr.trim() || result.finalOutput || `pi exited with code ${result.exitCode}`;
+}
+
+function agentOutput(result: AgentRunResult): string {
+  if (result.liveOutput?.trim()) return result.liveOutput.trim();
+  if (result.finalOutput.trim()) return result.finalOutput.trim();
+  if (isAgentErrored(result)) return summarizeFailure(result);
+  return "";
 }
 
 function resolvePath(cwd: string, rawPath: string): string {
@@ -859,9 +896,9 @@ async function runAgent(
       const processLine = (line: string) => {
         if (!line.trim()) return;
 
-        let event: any;
+        let event: AgentProcessEvent;
         try {
-          event = JSON.parse(line);
+          event = JSON.parse(line) as AgentProcessEvent;
         } catch {
           return;
         }
@@ -887,11 +924,12 @@ async function runAgent(
         if (event.type === "message_update") {
           const assistantEvent = event.assistantMessageEvent;
           const delta = typeof assistantEvent?.delta === "string" ? assistantEvent.delta : "";
-          const fullText = event.message ? messageText(event.message as Message) : "";
+          const fullText = event.message ? messageText(event.message) : "";
           if (fullText) assistantDraft = fullText;
           else if (delta) assistantDraft += delta;
 
           const text = assistantDraft || delta;
+          result.liveOutput = text;
           result.progressMessage = text
             ? `${progressAgentName} is writing: ${truncateInlineTail(text, 80)}`
             : `${progressAgentName} is writing...`;
@@ -930,21 +968,23 @@ async function runAgent(
         }
 
         if (event.type === "message_end" && event.message) {
-          const message = event.message as Message;
+          const message = event.message;
           messages.push(message);
           updateUsageFromMessage(result, message);
           result.finalOutput = finalAssistantOutput(messages);
+          result.liveOutput = result.finalOutput;
           result.progressMessage = result.finalOutput ? `${progressAgentName} output received.` : `${progressAgentName} completed a message.`;
           emitOutput(true, true);
           return;
         }
 
         if (event.type === "agent_end" && messages.length === 0 && Array.isArray(event.messages)) {
-          for (const message of event.messages as Message[]) {
+          for (const message of event.messages) {
             messages.push(message);
             updateUsageFromMessage(result, message);
           }
           result.finalOutput = finalAssistantOutput(messages);
+          result.liveOutput = result.finalOutput;
           result.progressMessage = result.finalOutput ? `${progressAgentName} output received.` : `${progressAgentName} finished.`;
           emitOutput(true, true);
         }
@@ -1326,6 +1366,7 @@ function buildDetails(
   maxConcurrency: number,
   results: PlanBuildResult[],
   skipped: PlanBuildDetails["skipped"],
+  agents: PlanBuildAgentDetails[],
   verifierAgent = DEFAULT_VERIFIER_AGENT,
   verifierRun?: AgentRunResult,
   monitor: BuilderMonitorConfig = defaultBuilderMonitorConfig(),
@@ -1336,6 +1377,7 @@ function buildDetails(
     verifierAgent,
     maxConcurrency,
     monitor,
+    agents: agents.map((agent) => ({ ...agent, output: truncateTextTail(agent.output) })),
     results: results.map((result) => ({
       id: result.task.id,
       title: result.task.title,
@@ -1696,9 +1738,24 @@ async function buildPlanFile(
   const attempted = new Set<string>();
   const results: PlanBuildResult[] = [];
   const skipped: PlanBuildDetails["skipped"] = [];
+  const agentViews = new Map<string, PlanBuildAgentDetails>();
   let verifierRun: AgentRunResult | undefined;
+  const updateAgentView = (id: string, update: Partial<PlanBuildAgentDetails>) => {
+    const current = agentViews.get(id);
+    if (current) agentViews.set(id, { ...current, ...update });
+  };
   const detailsFor = (currentVerifierRun = verifierRun) =>
-    buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, currentVerifierRun, monitor);
+    buildDetails(
+      relativePath,
+      builderAgent,
+      maxConcurrency,
+      results,
+      skipped,
+      Array.from(agentViews.values()),
+      verifierAgent,
+      currentVerifierRun,
+      monitor,
+    );
   const monitorSummary = monitor.enabled
     ? `builder monitor checks every ${monitor.intervalSeconds}s; stuck timeout ${monitor.stuckTimeoutSeconds}s; max restarts ${monitor.maxRestarts}`
     : "builder monitor disabled";
@@ -1773,7 +1830,22 @@ async function buildPlanFile(
         workspace,
         prompt: createBuilderTask(relativePath, latestTask, latestContent),
       });
+      agentViews.set(latestTask.id, {
+        id: latestTask.id,
+        title: latestTask.title,
+        agent: builderAgent,
+        status: "starting",
+        output: "",
+        progress: `Workspace ${workspace.name} is ready; starting agent...`,
+        workspaceName: workspace.name,
+        workspacePath: workspace.rootPath,
+      });
     }
+
+    onUpdate?.({
+      content: [{ type: "text", text: `Started ${launches.length} builder agent${launches.length === 1 ? "" : "s"}.` }],
+      details: detailsFor(),
+    });
 
     const runLaunch = async (launch: (typeof launches)[number]): Promise<TaskRunContext> => {
       try {
@@ -1789,6 +1861,12 @@ async function buildPlanFile(
               ? `${launch.task.id}: ${agentResult.progressMessage}`
               : `${launch.task.id}: ${builderAgent} is running on ${PLAN_BUILD_MODEL} (${effort} effort) in ${launch.workspace.name}...`;
 
+            updateAgentView(launch.task.id, {
+              status: "running",
+              output: agentOutput(agentResult),
+              progress: agentResult.progressMessage ?? status,
+              restartCount: agentResult.restartCount,
+            });
             onUpdate?.({
               content: [{ type: "text", text: status }],
               details: detailsFor(),
@@ -1796,6 +1874,17 @@ async function buildPlanFile(
           },
         );
         const classification = classifyBuilderResult(run);
+        updateAgentView(launch.task.id, {
+          status: classification.status === "done" ? "integrating" : classification.status,
+          output: agentOutput(run),
+          progress: classification.status === "done" ? "Agent finished; validating and integrating its commit..." : run.progressMessage,
+          exitCode: run.exitCode,
+          restartCount: run.restartCount,
+        });
+        onUpdate?.({
+          content: [{ type: "text", text: `${launch.task.id}: agent finished; processing result...` }],
+          details: detailsFor(),
+        });
         return {
           task: launch.task,
           workspace: launch.workspace,
@@ -1810,6 +1899,12 @@ async function buildPlanFile(
         };
       } catch (error) {
         const run = createFailedAgentResult(builderAgent, launch.prompt, launch.workspace.cwd, commandErrorMessage(error), effort);
+        updateAgentView(launch.task.id, {
+          status: "failed",
+          output: agentOutput(run),
+          progress: run.stderr,
+          exitCode: run.exitCode,
+        });
         return {
           task: launch.task,
           workspace: launch.workspace,
@@ -1833,6 +1928,13 @@ async function buildPlanFile(
       const finalized = await integrateTaskWorkspace(ctx.cwd, completed.taskRun.workspace, completed.taskRun.result, integratedHead);
       integratedHead = finalized.integratedHead;
       results.push(finalized.result);
+      updateAgentView(completed.taskRun.task.id, {
+        status: finalized.result.status,
+        output: agentOutput(finalized.result.run),
+        progress: finalized.result.integrationMessage ?? `${completed.taskRun.task.id} ${finalized.result.status}.`,
+        exitCode: finalized.result.run.exitCode,
+        restartCount: finalized.result.run.restartCount,
+      });
 
       await updatePlanTaskStatus(absolutePath, completed.taskRun.task.id, finalized.result.status, builderResultLog(finalized.result));
       notifyPlannerBuilder(`Plan task ${completed.taskRun.task.id} ${finalized.result.status}: ${completed.taskRun.task.title}`);
@@ -1874,6 +1976,14 @@ async function buildPlanFile(
     // Ignore cleanup failures; failed/blocked task workspaces may intentionally remain.
   }
 
+  agentViews.set("VERIFIER", {
+    id: "VERIFIER",
+    title: "Review integrated changes and write findings report",
+    agent: verifierAgent,
+    status: "starting",
+    output: "",
+    progress: "Starting verifier agent...",
+  });
   onUpdate?.({
     content: [{ type: "text", text: `Running ${verifierAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) to verify completed plan build...` }],
     details: detailsFor(),
@@ -1891,12 +2001,29 @@ async function buildPlanFile(
         ? `Verifier: ${agentResult.progressMessage}`
         : `${verifierAgent} is writing .pi/outputs/findings.html...`;
 
+      updateAgentView("VERIFIER", {
+        status: "running",
+        output: agentOutput(agentResult),
+        progress: agentResult.progressMessage ?? status,
+      });
       onUpdate?.({
         content: [{ type: "text", text: status }],
         details: detailsFor(agentResult),
       });
     },
   );
+  updateAgentView("VERIFIER", {
+    status: isAgentErrored(verifierRun) ? "failed" : "done",
+    output: agentOutput(verifierRun),
+    progress: isAgentErrored(verifierRun)
+      ? "Verifier failed; inspect its output for details."
+      : "Verifier finished; report written to .pi/outputs/findings.html.",
+    exitCode: verifierRun.exitCode,
+  });
+  onUpdate?.({
+    content: [{ type: "text", text: `Verifier ${isAgentErrored(verifierRun) ? "failed" : "finished"}.` }],
+    details: detailsFor(),
+  });
 
   notifyPlannerBuilder(
     isAgentErrored(verifierRun)
@@ -2110,8 +2237,18 @@ function startCommandProgress(ctx: ExtensionContext, key: string, initialText: s
 
 export default function (pi: ExtensionAPI) {
   let selectedEffort: SelectedEffort | undefined;
+  let activeBuildDashboard: PlanBuildDashboard | undefined;
+  let dashboardVisible = false;
 
   const getSelectedEffort = (): SelectedEffort => selectedEffort ?? normalizeThinkingLevel(pi.getThinkingLevel());
+  const startBuildDashboard = (ctx: ExtensionContext, planPath: string): PlanBuildDashboard => {
+    activeBuildDashboard?.detach();
+    const dashboard = new PlanBuildDashboard(planPath);
+    activeBuildDashboard = dashboard;
+    dashboardVisible = ctx.mode === "tui";
+    showPlanBuildDashboard(ctx, dashboard);
+    return dashboard;
+  };
 
   pi.events.on(EFFORT_STATE_EVENT, (state: unknown) => {
     const effort = isRecord(state) ? state.effort : undefined;
@@ -2125,10 +2262,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.registerMessageRenderer("planner-builder", (message, _options, theme) => {
-    const details = message.details as { progress?: boolean } | undefined;
-    if (!details?.progress) return undefined as never;
-
+  pi.registerMessageRenderer("planner-builder", (message, { expanded }, theme) => {
+    const details = message.details as unknown;
     const text =
       typeof message.content === "string"
         ? message.content
@@ -2137,7 +2272,57 @@ export default function (pi: ExtensionAPI) {
             .map((item) => item.text)
             .join("\n");
 
-    return new Text(theme.fg("dim", text), 1, 0);
+    if (isRecord(details) && details.progress) return new Text(theme.fg("dim", text), 1, 0);
+    if (isPlanBuildDetails(details)) return renderPlanBuildDetails(details, expanded, theme);
+    return new Text(text, 1, 0);
+  });
+
+  pi.registerShortcut("alt+k", {
+    description: "Select previous planner-builder agent",
+    handler: async (ctx) => {
+      const selected = activeBuildDashboard?.select(-1);
+      if (!selected) ctx.ui.notify("No planner-builder agents to select.", "info");
+    },
+  });
+
+  pi.registerShortcut("alt+j", {
+    description: "Select next planner-builder agent",
+    handler: async (ctx) => {
+      const selected = activeBuildDashboard?.select(1);
+      if (!selected) ctx.ui.notify("No planner-builder agents to select.", "info");
+    },
+  });
+
+  pi.registerShortcut("alt+o", {
+    description: "Collapse or expand selected planner-builder agent output",
+    handler: async (ctx) => {
+      const toggled = activeBuildDashboard?.toggleSelected();
+      if (!toggled) {
+        ctx.ui.notify("No planner-builder agent output to collapse.", "info");
+        return;
+      }
+      ctx.ui.notify(`${toggled.id} output ${toggled.collapsed ? "collapsed" : "expanded"}.`, "info");
+    },
+  });
+
+  pi.registerShortcut("alt+x", {
+    description: "Show or hide the planner-builder dashboard",
+    handler: async (ctx) => {
+      if (!activeBuildDashboard) {
+        ctx.ui.notify("No planner-builder dashboard is available.", "info");
+        return;
+      }
+
+      if (dashboardVisible) hidePlanBuildDashboard(ctx, activeBuildDashboard);
+      else showPlanBuildDashboard(ctx, activeBuildDashboard);
+      dashboardVisible = !dashboardVisible;
+    },
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (activeBuildDashboard) hidePlanBuildDashboard(ctx, activeBuildDashboard);
+    activeBuildDashboard = undefined;
+    dashboardVisible = false;
   });
 
   pi.registerTool({
@@ -2174,13 +2359,39 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: PlanBuildParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const dashboard = startBuildDashboard(ctx, params.path);
       try {
-        const result = await buildPlanFile(ctx, { ...params, effort: getSelectedEffort() }, signal, onUpdate);
+        const result = await buildPlanFile(ctx, { ...params, effort: getSelectedEffort() }, signal, (partial) => {
+          dashboard.update(partial.details);
+          onUpdate?.(partial);
+        });
+        dashboard.update(result.details);
         return { content: [{ type: "text", text: result.text }], details: result.details };
       } catch (error) {
-        notifyPlannerBuilder(`Plan build failed: ${commandErrorMessage(error)}`);
+        const message = commandErrorMessage(error);
+        dashboard.fail(message);
+        notifyPlannerBuilder(`Plan build failed: ${message}`);
         throw error;
       }
+    },
+    renderCall(args, theme) {
+      const path = args.path?.trim() || "...";
+      const taskCount = args.taskIds?.length ? ` · ${args.taskIds.length} selected task${args.taskIds.length === 1 ? "" : "s"}` : "";
+      return new Text(
+        `${theme.fg("toolTitle", theme.bold("plan_file_build"))} ${theme.fg("accent", path)}${theme.fg("muted", taskCount)}`,
+        0,
+        0,
+      );
+    },
+    renderResult(result, { expanded }, theme) {
+      const details = result.details as unknown;
+      if (isPlanBuildDetails(details)) return renderPlanBuildDetails(details, expanded, theme);
+
+      const text = result.content
+        .filter((item): item is TextContent => item?.type === "text" && typeof item.text === "string")
+        .map((item) => item.text)
+        .join("\n");
+      return new Text(text || "(no output)", 0, 0);
     },
   });
 
@@ -2276,11 +2487,10 @@ export default function (pi: ExtensionAPI) {
       const resolvedPlanPath = planPath;
       const run = async () => {
         let progress: ReturnType<typeof startCommandProgress> | undefined;
+        let dashboard: PlanBuildDashboard | undefined;
 
         try {
-          progress = startCommandProgress(ctx, "planner-builder", ctx.isIdle() ? "building..." : "waiting for current turn...", {
-            onLog: ctx.hasUI ? (text) => sendCommandProgressMessage(pi, ctx, "/plan-build", text) : undefined,
-          });
+          progress = startCommandProgress(ctx, "planner-builder", ctx.isIdle() ? "building..." : "waiting for current turn...");
 
           if (!ctx.isIdle()) {
             ctx.ui.notify("/plan-build queued; waiting for the current turn to finish.", "info");
@@ -2291,15 +2501,19 @@ export default function (pi: ExtensionAPI) {
             progress.log("Started builder agents in the background.");
           }
 
+          dashboard = startBuildDashboard(ctx, resolvedPlanPath);
           progress.update("building...");
           const result = await buildPlanFile(ctx, { path: resolvedPlanPath, taskIds, effort: getSelectedEffort() }, undefined, (partial) => {
+            dashboard?.update(partial.details);
             const statusText = statusTextFromUpdate(partial);
             if (statusText) progress?.update(statusText, { log: true });
           });
+          dashboard.update(result.details);
           pi.sendMessage({ customType: "planner-builder", content: result.text, display: true, details: result.details });
           ctx.ui.notify(`Plan build finished for ${resolvedPlanPath}.`, "info");
         } catch (error) {
           const message = commandErrorMessage(error);
+          dashboard?.fail(message);
           pi.sendMessage({
             customType: "planner-builder",
             content: `/plan-build failed.\n\n${message}`,
@@ -2337,7 +2551,7 @@ export default function (pi: ExtensionAPI) {
     if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable \"### Task TNN:\" blocks.`,
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
     };
   });
 }
