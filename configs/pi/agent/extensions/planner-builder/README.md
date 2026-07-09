@@ -6,16 +6,16 @@ Creates planner-generated plan files and dispatches plan tasks to builder agents
 
 | Command | Purpose |
 | --- | --- |
-| `/plan-create <request>` | Run the `planner` agent in the background and write a plan file under `.pi/plans/`. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
-| `/plan-build [plan-file] [T01,T02]` | Run `builder` agents for ready tasks in the background, one task at a time, and require each completed task to be committed with Jujutsu (`jj`). If no file is provided, the latest `.pi/plans/*.md` file is used. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
+| `/plan-create <request>` | Run the `planner` agent on `anthropic/claude-fable-5` using the currently selected effort, then write a plan file under `.pi/plans/`. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
+| `/plan-build [plan-file] [T01,T02]` | Run `builder` agents on `openai-codex/gpt-5.5` using the currently selected effort in parallel Jujutsu workspaces when tasks are independent, require each completed task to create one atomic commit, integrate commits serially onto the main workspace, then run the `verifier` agent to write `.pi/outputs/findings.html`. If no file is provided, the latest `.pi/plans/*.md` file is used. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
 | `/plan-list` | List recent plan files. |
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `plan_file_create` | LLM-callable tool that runs a planner agent and saves a structured plan file. |
-| `plan_file_build` | LLM-callable tool that runs builder agents against pending plan tasks, serializing them for atomic per-task `jj` commits. |
+| `plan_file_create` | LLM-callable tool that runs a planner agent on `anthropic/claude-fable-5` with the selected effort and saves a structured plan file. |
+| `plan_file_build` | LLM-callable tool that runs builder agents on `openai-codex/gpt-5.5` with the selected effort against pending plan tasks in parallel workspaces, serially integrates atomic per-task `jj` commits, then runs the `verifier` agent to write `.pi/outputs/findings.html`. |
 | `plan_file_list` | Lists recent plan files. |
 
 ## Plan format
@@ -46,11 +46,13 @@ Verification:
 - Exact command or manual check.
 ```
 
-`/plan-build` runs ready tasks in dependency order, one at a time, so each completed task can be committed atomically with Jujutsu. Dependent tasks wait until their dependencies have `Status: done`.
+`/plan-build` runs ready tasks in dependency order. Ready tasks with disjoint parsed `Files:` entries can run at the same time in separate Jujutsu workspaces; tasks with unknown or overlapping file sets are held for a later wave. Dependent tasks wait until their dependencies have `Status: done`.
+
+Each task workspace starts from the latest integrated main-workspace head. Builders create exactly one atomic commit in their dedicated workspace. After a builder reports `PLAN_TASK_RESULT: done`, the main loop validates that exactly one non-empty task commit exists, rebases it onto the current integrated head, checks for conflicts, and then advances the main workspace to a fresh child of the final integrated head when the build finishes. Failed, blocked, or conflicted task workspaces are kept on disk for inspection. After workspace integration finishes, the `verifier` agent reviews `main..@` and writes `.pi/outputs/findings.html`.
 
 The extension sends system notifications through `system-notify` when `/plan-create` finishes creating a plan, after each `/plan-build` task is marked `done`, `failed`, or `blocked`, and when a full plan build finishes or fails.
 
-Builder agents are instructed not to edit the plan file. The extension updates each task status to `in-progress`, then `done`, `failed`, or `blocked`, and appends a builder result log to the task block. Builders must inspect `jj status`, keep unrelated or plan-file status changes out of the commit (using a path/fileset-limited commit when needed), and create exactly one `jj commit` for the task before reporting `PLAN_TASK_RESULT: done`.
+Builder agents are instructed not to edit the plan file. The extension updates each task status to `in-progress`, then `done`, `failed`, or `blocked`, and appends a builder result log to the task block. Builders must inspect `jj status`, work only inside their assigned task workspace, and create exactly one `jj commit` for the task before reporting `PLAN_TASK_RESULT: done`.
 
 ## Typical workflow
 

@@ -23,18 +23,22 @@ import {
 
 const DEFAULT_PLANNER_AGENT = "planner";
 const DEFAULT_BUILDER_AGENT = "builder";
+const DEFAULT_VERIFIER_AGENT = "verifier";
+const PLAN_CREATE_MODEL = "anthropic/claude-fable-5";
+const PLAN_BUILD_MODEL = "openai-codex/gpt-5.5";
+const EFFORT_STATE_EVENT = "pi:effort-state";
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 const DEFAULT_PLAN_DIR = ".pi/plans";
-const DEFAULT_MAX_CONCURRENCY = 1;
-// Builder agents share the same working copy. Keep plan builds serial so each
-// completed task can create an atomic Jujutsu commit without sweeping in a
-// concurrent task's changes.
-const MAX_CONCURRENCY = 1;
+const DEFAULT_MAX_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 8;
 const STDERR_TAIL_LIMIT = 20_000;
 const COMMAND_LOG_MIN_INTERVAL_MS = 1_500;
 const COMMAND_LOG_MAX_ENTRIES = 80;
 
 type TextContent = { type: "text"; text: string };
 type TaskStatus = "pending" | "in-progress" | "done" | "failed" | "blocked";
+type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+type SelectedEffort = ThinkingLevel | "max";
 
 interface UsageStats {
   input: number;
@@ -56,9 +60,15 @@ interface AgentRunResult {
   stderr: string;
   usage: UsageStats;
   model?: string;
+  effort?: SelectedEffort;
   stopReason?: string;
   errorMessage?: string;
   progressMessage?: string;
+}
+
+interface AgentRunOptions {
+  model?: string;
+  effort?: SelectedEffort;
 }
 
 interface PlanTask {
@@ -84,11 +94,40 @@ interface PlanBuildResult {
   run: AgentRunResult;
   status: TaskStatus;
   marker?: string;
+  workspaceName?: string;
+  workspacePath?: string;
+  commitId?: string;
+  integrationMessage?: string;
+}
+
+interface TaskWorkspace {
+  name: string;
+  rootPath: string;
+  cwd: string;
+  baseRevision: string;
+}
+
+interface TaskRunContext {
+  task: PlanTask;
+  workspace: TaskWorkspace;
+  result: PlanBuildResult;
+}
+
+interface JjCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+interface TaskCommitInfo {
+  commitId: string;
+  changeId: string;
 }
 
 interface PlanBuildDetails {
   path: string;
   builderAgent: string;
+  verifierAgent: string;
   maxConcurrency: number;
   results: Array<{
     id: string;
@@ -102,6 +141,12 @@ interface PlanBuildDetails {
     title: string;
     reason: string;
   }>;
+  verifier?: {
+    status: "done" | "failed";
+    exitCode: number;
+    output: string;
+    reportPath: string;
+  };
 }
 
 type ToolUpdate<TDetails> = { content: TextContent[]; details: TDetails };
@@ -144,10 +189,11 @@ const PlanBuildParams = Type.Object({
     }),
   ),
   builderAgent: Type.Optional(Type.String({ description: 'Builder agent name. Default: "builder".' })),
+  verifierAgent: Type.Optional(Type.String({ description: 'Verifier agent name to run after plan-build completes. Default: "verifier".' })),
   agentScope: Type.Optional(AgentScopeSchema),
   maxConcurrency: Type.Optional(
     Type.Number({
-      description: `Maximum number of builder agents to run at once. Default: ${DEFAULT_MAX_CONCURRENCY}, max: ${MAX_CONCURRENCY}. Kept at 1 so each completed task can create an atomic Jujutsu commit.`,
+      description: `Maximum number of builder agents to run at once. Default: ${DEFAULT_MAX_CONCURRENCY}, max: ${MAX_CONCURRENCY}. Parallel tasks run in separate Jujutsu workspaces and are integrated serially.`,
       default: DEFAULT_MAX_CONCURRENCY,
       minimum: 1,
       maximum: MAX_CONCURRENCY,
@@ -439,14 +485,24 @@ function escapeCodeFence(text: string): string {
 
 function builderResultLog(result: PlanBuildResult): string {
   const output = result.run.finalOutput || (isAgentErrored(result.run) ? summarizeFailure(result.run) : "(no output)");
-  const marker = result.marker ? `\n- Result marker: ${result.marker}` : "";
+  const model = result.run.model ? [`- Model: ${result.run.model}`] : [];
+  const effort = result.run.effort ? [`- Effort: ${result.run.effort}`] : [];
+  const workspace = result.workspacePath ? [`- Workspace: ${result.workspacePath}`] : [];
+  const commit = result.commitId ? [`- Commit: ${result.commitId}`] : [];
+  const integration = result.integrationMessage ? [`- Integration: ${result.integrationMessage}`] : [];
+  const marker = result.marker ? [`- Result marker: ${result.marker}`] : [];
 
   return [
     `#### Builder result ${new Date().toISOString()}`,
     `- Agent: ${result.run.agent}`,
+    ...model,
+    ...effort,
+    ...workspace,
+    ...commit,
+    ...integration,
     `- Status: ${result.status}`,
     `- Exit code: ${result.run.exitCode}`,
-    marker,
+    ...marker,
     "",
     "```text",
     escapeCodeFence(truncateText(output, 12 * 1024, 400)),
@@ -491,16 +547,75 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
   return { command: "pi", args };
 }
 
-async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
-  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-planner-builder-"));
-  const safeName = agentName.replace(/[^A-Za-z0-9_.-]+/g, "_");
-  const filePath = path.join(dir, `prompt-${safeName}.md`);
+async function writeTempFile(prefix: string, fileName: string, content: string): Promise<{ dir: string; filePath: string }> {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), prefix));
+  const filePath = path.join(dir, fileName);
 
   await withFileMutationQueue(filePath, async () => {
-    await fs.promises.writeFile(filePath, prompt, { encoding: "utf8", mode: 0o600 });
+    await fs.promises.writeFile(filePath, content, { encoding: "utf8", mode: 0o600 });
   });
 
   return { dir, filePath };
+}
+
+async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
+  const safeName = agentName.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  return writeTempFile("pi-planner-builder-", `prompt-${safeName}.md`, prompt);
+}
+
+function maxEffortExtensionSource(): string {
+  return `function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+
+function isMaxCandidate(value) {
+  return value === "xhigh" || value === "high";
+}
+
+function applyMaxEffortOverride(payload) {
+  if (!isRecord(payload)) return false;
+
+  let changed = false;
+
+  if (isMaxCandidate(payload.reasoning_effort)) {
+    payload.reasoning_effort = "max";
+    changed = true;
+  }
+
+  const reasoning = payload.reasoning;
+  if (isRecord(reasoning) && isMaxCandidate(reasoning.effort)) {
+    reasoning.effort = "max";
+    changed = true;
+  }
+
+  const outputConfig = payload.output_config;
+  if (isRecord(outputConfig) && isMaxCandidate(outputConfig.effort)) {
+    outputConfig.effort = "max";
+    changed = true;
+  }
+
+  const additionalFields = payload.additionalModelRequestFields;
+  if (isRecord(additionalFields)) {
+    const additionalOutputConfig = additionalFields.output_config;
+    if (isRecord(additionalOutputConfig) && isMaxCandidate(additionalOutputConfig.effort)) {
+      additionalOutputConfig.effort = "max";
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+export default function (pi) {
+  pi.on("before_provider_request", (event) => {
+    if (applyMaxEffortOverride(event.payload)) return event.payload;
+  });
+}
+`;
+}
+
+async function writeMaxEffortExtensionToTempFile(): Promise<{ dir: string; filePath: string }> {
+  return writeTempFile("pi-planner-builder-effort-", "max-effort.ts", maxEffortExtensionSource());
 }
 
 async function runAgent(
@@ -508,10 +623,13 @@ async function runAgent(
   agents: AgentConfig[],
   agentName: string,
   task: string,
+  options: AgentRunOptions,
   signal: AbortSignal | undefined,
   onOutput?: (result: AgentRunResult) => void,
 ): Promise<AgentRunResult> {
   const agent = agents.find((candidate) => candidate.name === agentName);
+  const model = options.model?.trim() || agent?.model;
+  const thinkingLevel = options.effort === "max" ? "xhigh" : options.effort;
   const result: AgentRunResult = {
     agent: agentName,
     agentSource: agent?.source ?? "unknown",
@@ -521,7 +639,8 @@ async function runAgent(
     finalOutput: "",
     stderr: "",
     usage: emptyUsage(),
-    model: agent?.model,
+    model,
+    effort: options.effort,
   };
 
   if (!agent) {
@@ -534,13 +653,21 @@ async function runAgent(
   }
 
   const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
-  if (agent.model) args.push("--model", agent.model);
+  if (model) args.push("--model", model);
+  if (thinkingLevel) args.push("--thinking", thinkingLevel);
   if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 
   let promptDir: string | undefined;
+  let maxEffortExtensionDir: string | undefined;
   const messages: Message[] = [];
 
   try {
+    if (options.effort === "max") {
+      const extension = await writeMaxEffortExtensionToTempFile();
+      maxEffortExtensionDir = extension.dir;
+      args.push("--extension", extension.filePath);
+    }
+
     if (agent.systemPrompt.trim()) {
       const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
       promptDir = prompt.dir;
@@ -728,37 +855,16 @@ async function runAgent(
 
     return result;
   } finally {
-    if (promptDir) {
+    for (const tempDir of [promptDir, maxEffortExtensionDir]) {
+      if (!tempDir) continue;
+
       try {
-        fs.rmSync(promptDir, { recursive: true, force: true });
+        fs.rmSync(tempDir, { recursive: true, force: true });
       } catch {
         // Ignore cleanup failures.
       }
     }
   }
-}
-
-async function mapWithConcurrencyLimit<TIn, TOut>(
-  items: TIn[],
-  concurrency: number,
-  fn: (item: TIn, index: number) => Promise<TOut>,
-): Promise<TOut[]> {
-  if (items.length === 0) return [];
-
-  const limit = Math.max(1, Math.min(concurrency, items.length));
-  const results: TOut[] = new Array(items.length);
-  let nextIndex = 0;
-
-  const workers = new Array(limit).fill(undefined).map(async () => {
-    while (true) {
-      const currentIndex = nextIndex++;
-      if (currentIndex >= items.length) return;
-      results[currentIndex] = await fn(items[currentIndex], currentIndex);
-    }
-  });
-
-  await Promise.all(workers);
-  return results;
 }
 
 function findAgentOrThrow(agents: AgentConfig[], agentName: string): AgentConfig {
@@ -806,6 +912,7 @@ async function createPlanFile(
     agentScope?: AgentScope;
     overwrite?: boolean;
     confirmProjectAgents?: boolean;
+    effort?: SelectedEffort;
   },
   signal?: AbortSignal,
   onUpdate?: OnUpdateCallback<PlanCreateDetails>,
@@ -815,6 +922,7 @@ async function createPlanFile(
 
   const plannerAgent = params.plannerAgent?.trim() || DEFAULT_PLANNER_AGENT;
   const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
+  const effort = params.effort ?? "off";
   const agentScope = params.agentScope ?? "user";
   const discovery = discoverAgents(ctx.cwd, agentScope);
   const agents = discovery.agents;
@@ -836,20 +944,31 @@ async function createPlanFile(
     throw new Error(`Plan file already exists: ${relativePath}. Pass overwrite: true or choose another path.`);
   }
 
-  onUpdate?.({ content: [{ type: "text", text: `Running ${plannerAgent} to create ${relativePath}...` }], details });
-
-  const plannerResult = await runAgent(ctx.cwd, agents, plannerAgent, createPlannerTask(request, builderAgent), signal, (result) => {
-    const status = result.finalOutput
-      ? `Planner output received for ${relativePath}.`
-      : result.progressMessage
-        ? `${result.progressMessage} Creating ${relativePath}.`
-        : `Running ${plannerAgent} to create ${relativePath}...`;
-
-    onUpdate?.({
-      content: [{ type: "text", text: status }],
-      details,
-    });
+  onUpdate?.({
+    content: [{ type: "text", text: `Running ${plannerAgent} on ${PLAN_CREATE_MODEL} (${effort} effort) to create ${relativePath}...` }],
+    details,
   });
+
+  const plannerResult = await runAgent(
+    ctx.cwd,
+    agents,
+    plannerAgent,
+    createPlannerTask(request, builderAgent),
+    { model: PLAN_CREATE_MODEL, effort },
+    signal,
+    (result) => {
+      const status = result.finalOutput
+        ? `Planner output received for ${relativePath}.`
+        : result.progressMessage
+          ? `${result.progressMessage} Creating ${relativePath}.`
+          : `Running ${plannerAgent} on ${PLAN_CREATE_MODEL} (${effort} effort) to create ${relativePath}...`;
+
+      onUpdate?.({
+        content: [{ type: "text", text: status }],
+        details,
+      });
+    },
+  );
 
   if (isAgentErrored(plannerResult)) {
     throw new Error(`Planner agent failed.\n\n${truncateText(summarizeFailure(plannerResult))}`);
@@ -885,19 +1004,21 @@ function createBuilderTask(planPath: string, task: PlanTask, fullPlan: string): 
   return [
     "You are implementing one task from a planner-created multi-agent plan file.",
     "",
-    `Plan file: ${planPath}`,
+    `Plan file in main workspace: ${planPath}`,
     `Assigned task: ${task.id} - ${task.title}`,
     "",
     "Rules:",
     "- Implement only the assigned task unless a direct dependency is required to make it work.",
-    "- Do not edit the plan file; the planner-builder extension updates task statuses.",
+    "- You are already running inside a dedicated Jujutsu workspace for this task.",
+    "- Do not create, forget, switch, rebase, merge, or otherwise manage Jujutsu workspaces; the planner-builder extension handles workspace integration.",
+    "- Do not edit the plan file; it may not exist in this task workspace and the planner-builder extension updates task statuses from the main workspace.",
     "- Avoid unrelated refactors and unrelated files.",
     "- Use Jujutsu (`jj`) for version-control operations; do not use Git.",
-    "- Before editing, inspect `jj status --no-pager` so you know whether unrelated working-copy changes already exist.",
-    "- Do not include unrelated changes or plan-file status updates in the task commit.",
-    "- If unrelated or plan-file changes are present, use a path/fileset-limited `jj commit` that includes only this task's changes, or report blocked if you cannot isolate them safely.",
-    `- After implementation and verification pass, create exactly one atomic Jujutsu commit for this task's changes before your final response (for example: \`jj commit -m ${JSON.stringify(`${task.id}: ${task.title}`)}\` when the working copy only contains this task's changes).`,
-    "- Only report `PLAN_TASK_RESULT: done` after the Jujutsu commit succeeds. If you cannot safely create an atomic commit, report `PLAN_TASK_RESULT: blocked` or `PLAN_TASK_RESULT: failed` and explain why.",
+    "- Before editing, inspect `jj status --no-pager` so you know the task workspace state.",
+    `- After implementation and verification pass, create exactly one atomic Jujutsu commit for this task's changes before your final response (for example: \`jj commit -m ${JSON.stringify(`${task.id}: ${task.title}`)}\`).`,
+    "- Leave the task workspace with a clean/empty working-copy commit after that task commit; do not make extra edits after committing.",
+    "- The main planner-builder loop will rebase/integrate your task commit on top of the main workspace after you finish.",
+    "- Only report `PLAN_TASK_RESULT: done` after the Jujutsu commit succeeds. If you cannot safely create exactly one atomic commit, report `PLAN_TASK_RESULT: blocked` or `PLAN_TASK_RESULT: failed` and explain why.",
     "- Read relevant files before editing and follow existing patterns.",
     "- Run focused verification. If no useful automated check exists, explain the manual verification performed.",
     "- If blocked, do not force changes. Explain the blocker.",
@@ -910,6 +1031,29 @@ function createBuilderTask(planPath: string, task: PlanTask, fullPlan: string): 
     "Full plan context:",
     "",
     truncateText(fullPlan, 30 * 1024, 1_000),
+  ].join("\n");
+}
+
+function createVerifierTask(planPath: string, results: PlanBuildResult[]): string {
+  const summary = results.length
+    ? results.map((result) => `- ${result.task.id} ${result.status}: ${result.task.title}`).join("\n")
+    : "- No builder tasks were run.";
+
+  return [
+    "Verify the completed planner-builder plan build.",
+    "",
+    `Plan file: ${planPath}`,
+    "",
+    "The planner-builder extension has finished running builder task workspaces and integrating completed task commits onto the current main workspace.",
+    "Review the repository's current changes against the `main` bookmark and write the required HTML findings report.",
+    "",
+    "Builder task results:",
+    summary,
+    "",
+    "Follow your verifier agent instructions exactly:",
+    "- Use Jujutsu (`jj`), not Git.",
+    "- Write `.pi/outputs/findings.html` at the repository root.",
+    "- Do not modify any other files.",
   ].join("\n");
 }
 
@@ -951,20 +1095,339 @@ function buildDetails(
   maxConcurrency: number,
   results: PlanBuildResult[],
   skipped: PlanBuildDetails["skipped"],
+  verifierAgent = DEFAULT_VERIFIER_AGENT,
+  verifierRun?: AgentRunResult,
 ): PlanBuildDetails {
   return {
     path: planPath,
     builderAgent,
+    verifierAgent,
     maxConcurrency,
     results: results.map((result) => ({
       id: result.task.id,
       title: result.task.title,
       status: result.status,
       exitCode: result.run.exitCode,
-      output: truncateText(result.run.finalOutput || result.run.stderr, 12 * 1024, 400),
+      output: truncateText(
+        [result.run.finalOutput || result.run.stderr, result.integrationMessage].filter(Boolean).join("\n\n"),
+        12 * 1024,
+        400,
+      ),
     })),
     skipped,
+    verifier: verifierRun
+      ? {
+          status: isAgentErrored(verifierRun) ? "failed" : "done",
+          exitCode: verifierRun.exitCode,
+          output: truncateText(verifierRun.finalOutput || verifierRun.stderr, 12 * 1024, 400),
+          reportPath: ".pi/outputs/findings.html",
+        }
+      : undefined,
   };
+}
+
+function createFailedAgentResult(
+  agentName: string,
+  task: string,
+  cwd: string,
+  message: string,
+  effort: SelectedEffort,
+): AgentRunResult {
+  return {
+    agent: agentName,
+    agentSource: "unknown",
+    task,
+    cwd,
+    exitCode: 1,
+    finalOutput: "",
+    stderr: message,
+    usage: emptyUsage(),
+    model: PLAN_BUILD_MODEL,
+    effort,
+  };
+}
+
+function normalizeTaskFilePath(rawPath: string): string | undefined {
+  const fromBackticks = rawPath.match(/`([^`]+)`/)?.[1];
+  const value = (fromBackticks ?? rawPath)
+    .replace(/^[-*]\s+/, "")
+    .replace(/^@/, "")
+    .replace(/^\.\//, "")
+    .trim();
+
+  if (!value || /^none$/i.test(value)) return undefined;
+
+  const withoutDescription = value.split(/\s+(?:-|—|–|:)\s+/)[0]?.trim() || value;
+  return withoutDescription
+    .replace(/\s+\([^)]*\)$/, "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/\/$/, "") || undefined;
+}
+
+function parseTaskFiles(block: string): string[] | undefined {
+  const lines = block.split(/\r?\n/);
+  const files = new Set<string>();
+  let inFiles = false;
+
+  for (const line of lines) {
+    if (/^Files:\s*$/i.test(line.trim())) {
+      inFiles = true;
+      continue;
+    }
+
+    const inlineFiles = line.match(/^Files:\s*(.+)$/i);
+    if (inlineFiles) {
+      for (const item of inlineFiles[1].split(/[,;]/)) {
+        const filePath = normalizeTaskFilePath(item);
+        if (filePath) files.add(filePath);
+      }
+      inFiles = true;
+      continue;
+    }
+
+    if (!inFiles) continue;
+    if (/^[A-Za-z][A-Za-z0-9 _-]*:\s*$/.test(line.trim())) break;
+    if (/^#{1,6}\s+/.test(line.trim())) break;
+
+    const filePath = normalizeTaskFilePath(line);
+    if (filePath) files.add(filePath);
+  }
+
+  return files.size > 0 ? Array.from(files).sort() : undefined;
+}
+
+function taskFilesOverlap(left: string[] | undefined, right: string[] | undefined): boolean {
+  if (!left || !right) return true;
+
+  for (const leftPath of left) {
+    for (const rightPath of right) {
+      if (leftPath === rightPath) return true;
+      if (leftPath.startsWith(`${rightPath}/`) || rightPath.startsWith(`${leftPath}/`)) return true;
+    }
+  }
+
+  return false;
+}
+
+function selectParallelTaskBatch(tasks: PlanTask[], maxConcurrency: number): Array<{ task: PlanTask; files: string[] | undefined }> {
+  const selected: Array<{ task: PlanTask; files: string[] | undefined }> = [];
+  const orderedTasks = [...tasks].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+  for (const task of orderedTasks) {
+    if (selected.length >= maxConcurrency) break;
+
+    const files = parseTaskFiles(task.block);
+    if (selected.some((item) => taskFilesOverlap(item.files, files))) continue;
+
+    selected.push({ task, files });
+  }
+
+  return selected;
+}
+
+function commandForDisplay(command: string, args: string[]): string {
+  return [command, ...args].join(" ");
+}
+
+async function runCommand(command: string, args: string[], cwd: string): Promise<JjCommandResult> {
+  return await new Promise<JjCommandResult>((resolve) => {
+    const proc = spawn(command, args, {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    proc.stderr.on("data", (chunk: string) => {
+      stderr = appendStderrTail(stderr, chunk);
+    });
+    proc.on("error", (error) => {
+      stderr = appendStderrTail(stderr, `${error.message}\n`);
+      resolve({ exitCode: 1, stdout, stderr });
+    });
+    proc.on("close", (code) => {
+      resolve({ exitCode: code ?? 0, stdout, stderr });
+    });
+  });
+}
+
+async function runJj(cwd: string, args: string[], allowFailure = false): Promise<JjCommandResult> {
+  const result = await runCommand("jj", ["--no-pager", ...args], cwd);
+  if (!allowFailure && result.exitCode !== 0) {
+    throw new Error(
+      `${commandForDisplay("jj", args)} failed with exit code ${result.exitCode}.\n\n${truncateText(result.stderr || result.stdout)}`,
+    );
+  }
+
+  return result;
+}
+
+async function getJjOutputLine(cwd: string, args: string[]): Promise<string> {
+  const result = await runJj(cwd, args);
+  const lines = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length !== 1) {
+    throw new Error(`Expected one line from ${commandForDisplay("jj", args)}, got ${lines.length}:\n${truncateText(result.stdout)}`);
+  }
+
+  return lines[0];
+}
+
+async function getCommitId(cwd: string, revset: string): Promise<string> {
+  return getJjOutputLine(cwd, ["log", "--no-graph", "-r", revset, "-T", 'commit_id ++ "\\n"']);
+}
+
+async function getJjWorkspaceRoot(cwd: string): Promise<string> {
+  return getJjOutputLine(cwd, ["workspace", "root"]);
+}
+
+async function listTaskCommits(workspaceCwd: string, baseRevision: string): Promise<TaskCommitInfo[]> {
+  const result = await runJj(workspaceCwd, ["log", "--no-graph", "-r", `${baseRevision}..@-`, "-T", 'commit_id ++ " " ++ change_id ++ "\\n"']);
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [commitId, changeId] = line.split(/\s+/);
+      if (!commitId || !changeId) throw new Error(`Unexpected jj log output: ${line}`);
+      return { commitId, changeId };
+    });
+}
+
+async function revisionHasDiff(cwd: string, revset: string): Promise<boolean> {
+  const result = await runJj(cwd, ["diff", "-r", revset, "--summary"]);
+  return Boolean(result.stdout.trim());
+}
+
+async function listRevisionConflicts(cwd: string, revset: string): Promise<string> {
+  const result = await runJj(cwd, ["resolve", "--list", "-r", revset], true);
+  const output = (result.stdout || result.stderr).trim();
+  if (result.exitCode !== 0 && /no conflicts found/i.test(output)) return "";
+  if (result.exitCode !== 0) return output;
+  return result.stdout.trim();
+}
+
+async function createTaskWorkspace(
+  mainCwd: string,
+  repoRoot: string,
+  runRoot: string,
+  runId: string,
+  task: PlanTask,
+  baseRevision: string,
+): Promise<TaskWorkspace> {
+  const workspaceName = `pi-plan-${runId}-${task.id.toLowerCase()}`;
+  const rootPath = path.join(runRoot, task.id.toLowerCase());
+  await runJj(mainCwd, ["workspace", "add", "--name", workspaceName, "--revision", baseRevision, rootPath]);
+
+  const relativeCwd = path.relative(repoRoot, mainCwd);
+  const workspaceCwd = relativeCwd && !relativeCwd.startsWith("..") && !path.isAbsolute(relativeCwd)
+    ? path.join(rootPath, relativeCwd)
+    : rootPath;
+
+  await fs.promises.mkdir(workspaceCwd, { recursive: true });
+  return { name: workspaceName, rootPath, cwd: workspaceCwd, baseRevision };
+}
+
+async function cleanupTaskWorkspace(mainCwd: string, workspace: TaskWorkspace): Promise<void> {
+  await runJj(mainCwd, ["workspace", "forget", workspace.name]);
+  await fs.promises.rm(workspace.rootPath, { recursive: true, force: true });
+}
+
+async function validateTaskWorkspaceCommit(workspace: TaskWorkspace): Promise<TaskCommitInfo> {
+  const hasUncommittedDiff = await revisionHasDiff(workspace.cwd, "@");
+  if (hasUncommittedDiff) {
+    throw new Error("Task workspace still has uncommitted changes in its working-copy commit. The builder must create exactly one commit and leave @ empty.");
+  }
+
+  const commits = await listTaskCommits(workspace.cwd, workspace.baseRevision);
+  if (commits.length !== 1) {
+    throw new Error(`Expected exactly one task commit after ${workspace.baseRevision}, found ${commits.length}.`);
+  }
+
+  const commit = commits[0];
+  if (!commit) throw new Error(`Expected exactly one task commit after ${workspace.baseRevision}, found 0.`);
+
+  if (!(await revisionHasDiff(workspace.cwd, commit.commitId))) {
+    throw new Error(`Task commit ${commit.commitId} is empty.`);
+  }
+
+  return commit;
+}
+
+async function integrateTaskWorkspace(
+  mainCwd: string,
+  workspace: TaskWorkspace,
+  result: PlanBuildResult,
+  integratedHead: string,
+): Promise<{ result: PlanBuildResult; integratedHead: string }> {
+  if (result.status !== "done") {
+    result.integrationMessage = result.workspacePath ? `Workspace kept for inspection at ${result.workspacePath}.` : undefined;
+    return { result, integratedHead };
+  }
+
+  let commit: TaskCommitInfo;
+  try {
+    commit = await validateTaskWorkspaceCommit(workspace);
+  } catch (error) {
+    result.status = "failed";
+    result.integrationMessage = `${commandErrorMessage(error)} Workspace kept for inspection at ${workspace.rootPath}.`;
+    return { result, integratedHead };
+  }
+
+  result.commitId = commit.commitId;
+
+  const rebase = await runJj(mainCwd, ["rebase", "-r", commit.commitId, "--onto", integratedHead], true);
+  if (rebase.exitCode !== 0) {
+    result.status = "blocked";
+    result.integrationMessage = `Could not rebase task commit onto ${integratedHead}: ${truncateInline(rebase.stderr || rebase.stdout, 180)}. Workspace kept at ${workspace.rootPath}.`;
+    return { result, integratedHead };
+  }
+
+  let rebasedCommitId: string;
+  try {
+    rebasedCommitId = await getCommitId(mainCwd, commit.changeId);
+  } catch (error) {
+    result.status = "blocked";
+    result.integrationMessage = `Could not find the rebased task commit for change ${commit.changeId}: ${commandErrorMessage(error)}. Workspace kept at ${workspace.rootPath}.`;
+    return { result, integratedHead };
+  }
+
+  const conflicts = await listRevisionConflicts(mainCwd, commit.changeId);
+  if (conflicts) {
+    result.status = "blocked";
+    result.commitId = rebasedCommitId;
+    result.integrationMessage = `Rebased task commit has conflicts: ${truncateInline(conflicts, 180)}. Workspace kept at ${workspace.rootPath}.`;
+    return { result, integratedHead };
+  }
+
+  result.commitId = rebasedCommitId;
+  result.integrationMessage = `Integrated ${rebasedCommitId} on top of ${integratedHead}.`;
+
+  try {
+    await cleanupTaskWorkspace(mainCwd, workspace);
+  } catch (error) {
+    result.integrationMessage = `${result.integrationMessage} Workspace cleanup failed: ${commandErrorMessage(error)}`;
+  }
+
+  return { result, integratedHead: rebasedCommitId };
+}
+
+async function restorePlanFileAfterWorkspaceMove(absolutePath: string, content: string): Promise<void> {
+  await withFileMutationQueue(absolutePath, async () => {
+    await fs.promises.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.promises.writeFile(absolutePath, content, "utf8");
+  });
 }
 
 async function buildPlanFile(
@@ -973,9 +1436,11 @@ async function buildPlanFile(
     path: string;
     taskIds?: string[];
     builderAgent?: string;
+    verifierAgent?: string;
     agentScope?: AgentScope;
     maxConcurrency?: number;
     confirmProjectAgents?: boolean;
+    effort?: SelectedEffort;
   },
   signal?: AbortSignal,
   onUpdate?: OnUpdateCallback<PlanBuildDetails>,
@@ -983,6 +1448,8 @@ async function buildPlanFile(
   const absolutePath = resolvePath(ctx.cwd, params.path);
   const relativePath = displayPath(ctx.cwd, absolutePath);
   const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
+  const verifierAgent = params.verifierAgent?.trim() || DEFAULT_VERIFIER_AGENT;
+  const effort = params.effort ?? "off";
   const agentScope = params.agentScope ?? "user";
   const maxConcurrency = Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(params.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY)));
   const discovery = discoverAgents(ctx.cwd, agentScope);
@@ -991,11 +1458,19 @@ async function buildPlanFile(
   const attempted = new Set<string>();
   const results: PlanBuildResult[] = [];
   const skipped: PlanBuildDetails["skipped"] = [];
+  let verifierRun: AgentRunResult | undefined;
 
   findAgentOrThrow(agents, builderAgent);
-  await confirmProjectAgents(ctx, discovery, agents, agentScope, [builderAgent], params.confirmProjectAgents ?? true);
+  findAgentOrThrow(agents, verifierAgent);
+  await confirmProjectAgents(ctx, discovery, agents, agentScope, [builderAgent, verifierAgent], params.confirmProjectAgents ?? true);
 
   if (!fs.existsSync(absolutePath)) throw new Error(`Plan file not found: ${relativePath}`);
+
+  const repoRoot = await getJjWorkspaceRoot(ctx.cwd);
+  const initialHead = await getCommitId(ctx.cwd, "@");
+  let integratedHead = initialHead;
+  const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const runRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), `pi-plan-build-${runId}-`));
 
   while (true) {
     const content = await fs.promises.readFile(absolutePath, "utf8");
@@ -1019,59 +1494,172 @@ async function buildPlanFile(
       break;
     }
 
+    const batch = selectParallelTaskBatch(ready, maxConcurrency);
+    if (batch.length === 0) {
+      for (const task of blocked) {
+        skipped.push({ id: task.id, title: task.title, reason: taskBlockerReason(task, tasksById) });
+      }
+      break;
+    }
+
     onUpdate?.({
       content: [
         {
           type: "text",
-          text: `Running ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} serially for atomic commits...`,
+          text: `Running ${batch.length} of ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) in parallel workspaces...`,
         },
       ],
-      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped),
+      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
     });
 
-    const waveResults = await mapWithConcurrencyLimit(ready, maxConcurrency, async (task) => {
-      attempted.add(task.id);
-      await updatePlanTaskStatus(absolutePath, task.id, "in-progress");
+    const launches: Array<{
+      task: PlanTask;
+      workspace: TaskWorkspace;
+      prompt: string;
+    }> = [];
+
+    for (const item of batch) {
+      attempted.add(item.task.id);
+      const workspace = await createTaskWorkspace(ctx.cwd, repoRoot, runRoot, runId, item.task, integratedHead);
+      await updatePlanTaskStatus(absolutePath, item.task.id, "in-progress");
 
       const latestContent = await fs.promises.readFile(absolutePath, "utf8");
-      const latestTask = parsePlanTasks(latestContent).find((candidate) => candidate.id === task.id) ?? task;
-      const run = await runAgent(
-        ctx.cwd,
-        agents,
-        builderAgent,
-        createBuilderTask(relativePath, latestTask, latestContent),
-        signal,
-        (agentResult) => {
-          const status = agentResult.progressMessage
-            ? `${latestTask.id}: ${agentResult.progressMessage}`
-            : `${latestTask.id}: ${builderAgent} is running...`;
+      const latestTask = parsePlanTasks(latestContent).find((candidate) => candidate.id === item.task.id) ?? item.task;
+      launches.push({
+        task: latestTask,
+        workspace,
+        prompt: createBuilderTask(relativePath, latestTask, latestContent),
+      });
+    }
 
-          onUpdate?.({
-            content: [{ type: "text", text: status }],
-            details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped),
-          });
-        },
-      );
-      const classification = classifyBuilderResult(run);
-      const result: PlanBuildResult = { task: latestTask, run, status: classification.status, marker: classification.marker };
+    const runLaunch = async (launch: (typeof launches)[number]): Promise<TaskRunContext> => {
+      try {
+        const run = await runAgent(
+          launch.workspace.cwd,
+          agents,
+          builderAgent,
+          launch.prompt,
+          { model: PLAN_BUILD_MODEL, effort },
+          signal,
+          (agentResult) => {
+            const status = agentResult.progressMessage
+              ? `${launch.task.id}: ${agentResult.progressMessage}`
+              : `${launch.task.id}: ${builderAgent} is running on ${PLAN_BUILD_MODEL} (${effort} effort) in ${launch.workspace.name}...`;
 
-      await updatePlanTaskStatus(absolutePath, task.id, classification.status, builderResultLog(result));
-      notifyPlannerBuilder(`Plan task ${latestTask.id} ${classification.status}: ${latestTask.title}`);
-      return result;
-    });
+            onUpdate?.({
+              content: [{ type: "text", text: status }],
+              details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+            });
+          },
+        );
+        const classification = classifyBuilderResult(run);
+        return {
+          task: launch.task,
+          workspace: launch.workspace,
+          result: {
+            task: launch.task,
+            run,
+            status: classification.status,
+            marker: classification.marker,
+            workspaceName: launch.workspace.name,
+            workspacePath: launch.workspace.rootPath,
+          },
+        };
+      } catch (error) {
+        const run = createFailedAgentResult(builderAgent, launch.prompt, launch.workspace.cwd, commandErrorMessage(error), effort);
+        return {
+          task: launch.task,
+          workspace: launch.workspace,
+          result: {
+            task: launch.task,
+            run,
+            status: "failed",
+            workspaceName: launch.workspace.name,
+            workspacePath: launch.workspace.rootPath,
+            integrationMessage: `Workspace kept for inspection at ${launch.workspace.rootPath}.`,
+          },
+        };
+      }
+    };
 
-    results.push(...waveResults);
+    const running = launches.map((launch) => runLaunch(launch));
+    while (running.length > 0) {
+      const completed = await Promise.race(running.map((promise, index) => promise.then((taskRun) => ({ index, taskRun }))));
+      running.splice(completed.index, 1);
+
+      const finalized = await integrateTaskWorkspace(ctx.cwd, completed.taskRun.workspace, completed.taskRun.result, integratedHead);
+      integratedHead = finalized.integratedHead;
+      results.push(finalized.result);
+
+      await updatePlanTaskStatus(absolutePath, completed.taskRun.task.id, finalized.result.status, builderResultLog(finalized.result));
+      notifyPlannerBuilder(`Plan task ${completed.taskRun.task.id} ${finalized.result.status}: ${completed.taskRun.task.title}`);
+
+      onUpdate?.({
+        content: [
+          {
+            type: "text",
+            text: `${completed.taskRun.task.id} ${finalized.result.status}; latest integrated head is ${integratedHead}.`,
+          },
+        ],
+        details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+      });
+    }
 
     onUpdate?.({
       content: [
         {
           type: "text",
-          text: `Completed ${results.length} task${results.length === 1 ? "" : "s"} from ${relativePath}.`,
+          text: `Completed ${results.length} task${results.length === 1 ? "" : "s"} from ${relativePath}; latest integrated head is ${integratedHead}.`,
         },
       ],
-      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped),
+      details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
     });
+
+    if (signal?.aborted) break;
   }
+
+  if (integratedHead !== initialHead) {
+    const finalPlanContent = await fs.promises.readFile(absolutePath, "utf8");
+    await runJj(ctx.cwd, ["new", integratedHead]);
+    await restorePlanFileAfterWorkspaceMove(absolutePath, finalPlanContent);
+  }
+
+  try {
+    const remaining = await fs.promises.readdir(runRoot);
+    if (remaining.length === 0) await fs.promises.rm(runRoot, { recursive: true, force: true });
+  } catch {
+    // Ignore cleanup failures; failed/blocked task workspaces may intentionally remain.
+  }
+
+  onUpdate?.({
+    content: [{ type: "text", text: `Running ${verifierAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) to verify completed plan build...` }],
+    details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun),
+  });
+
+  verifierRun = await runAgent(
+    ctx.cwd,
+    agents,
+    verifierAgent,
+    createVerifierTask(relativePath, results),
+    { model: PLAN_BUILD_MODEL, effort },
+    signal,
+    (agentResult) => {
+      const status = agentResult.progressMessage
+        ? `Verifier: ${agentResult.progressMessage}`
+        : `${verifierAgent} is writing .pi/outputs/findings.html...`;
+
+      onUpdate?.({
+        content: [{ type: "text", text: status }],
+        details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, agentResult),
+      });
+    },
+  );
+
+  notifyPlannerBuilder(
+    isAgentErrored(verifierRun)
+      ? `Plan verifier failed for ${relativePath}.`
+      : `Plan verifier finished for ${relativePath}: .pi/outputs/findings.html`,
+  );
 
   if (targetIds.size > 0) {
     const content = await fs.promises.readFile(absolutePath, "utf8");
@@ -1086,9 +1674,16 @@ async function buildPlanFile(
   const blockedCount = results.filter((result) => result.status === "blocked").length;
   const summaryLines = results.map((result) => `- ${result.task.id} ${result.status}: ${result.task.title}`);
   const skippedLines = skipped.map((item) => `- ${item.id}: ${item.reason}`);
+  let verifierText = "Verifier did not run.";
+  if (verifierRun && isAgentErrored(verifierRun)) {
+    verifierText = "Verifier failed. Expected report path: .pi/outputs/findings.html";
+  } else if (verifierRun) {
+    verifierText = "Verifier finished. Report: .pi/outputs/findings.html";
+  }
   const text = [
     `Plan build finished for ${relativePath}.`,
     `Results: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped.`,
+    verifierText,
     summaryLines.length ? `\nTasks:\n${summaryLines.join("\n")}` : "",
     skippedLines.length ? `\nSkipped:\n${skippedLines.join("\n")}` : "",
   ]
@@ -1096,9 +1691,9 @@ async function buildPlanFile(
     .join("\n");
 
   notifyPlannerBuilder(
-    `Plan build finished for ${relativePath}: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped.`,
+    `Plan build finished for ${relativePath}: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped; verifier ${verifierRun && !isAgentErrored(verifierRun) ? "done" : "failed"}.`,
   );
-  return { text, details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped) };
+  return { text, details: buildDetails(relativePath, builderAgent, maxConcurrency, results, skipped, verifierAgent, verifierRun) };
 }
 
 async function listPlanFiles(cwd: string, limit: number): Promise<Array<{ path: string; mtimeMs: number; taskCount: number }>> {
@@ -1142,6 +1737,18 @@ function commandErrorMessage(error: unknown): string {
 
 function notifyPlannerBuilder(message: string): void {
   sendSystemNotification(truncateInline(message, 240), "Pi planner-builder");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+function normalizeThinkingLevel(value: string): ThinkingLevel {
+  return isThinkingLevel(value) ? value : "off";
 }
 
 async function notifyCommandError(ctx: ExtensionContext, error: unknown): Promise<void> {
@@ -1259,6 +1866,22 @@ function startCommandProgress(ctx: ExtensionContext, key: string, initialText: s
 }
 
 export default function (pi: ExtensionAPI) {
+  let selectedEffort: SelectedEffort | undefined;
+
+  const getSelectedEffort = (): SelectedEffort => selectedEffort ?? normalizeThinkingLevel(pi.getThinkingLevel());
+
+  pi.events.on(EFFORT_STATE_EVENT, (state: unknown) => {
+    const effort = isRecord(state) ? state.effort : undefined;
+
+    if (effort === "max") {
+      selectedEffort = "max";
+    } else if (isThinkingLevel(effort)) {
+      selectedEffort = effort;
+    } else {
+      selectedEffort = undefined;
+    }
+  });
+
   pi.registerMessageRenderer("planner-builder", (message, _options, theme) => {
     const details = message.details as { progress?: boolean } | undefined;
     if (!details?.progress) return undefined as never;
@@ -1277,8 +1900,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "plan_file_create",
     label: "Create Plan File",
-    description: "Run the planner agent and save a structured plan file with builder task blocks.",
-    promptSnippet: "Run planner agent and write a multi-builder plan file under .pi/plans.",
+    description: "Run the planner agent on claude-fable-5 with the selected effort and save a structured plan file with builder task blocks.",
+    promptSnippet: "Run planner agent on claude-fable-5 with the selected effort and write a multi-builder plan file under .pi/plans.",
     promptGuidelines: [
       "Use plan_file_create when the user asks to create a planner-generated plan file for builder agents.",
       "Use plan_file_build after plan_file_create when the user asks multiple builder agents to implement plan tasks.",
@@ -1286,7 +1909,7 @@ export default function (pi: ExtensionAPI) {
     parameters: PlanCreateParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
-        const result = await createPlanFile(ctx, params, signal, onUpdate);
+        const result = await createPlanFile(ctx, { ...params, effort: getSelectedEffort() }, signal, onUpdate);
         return { content: [{ type: "text", text: result.text }], details: result.details };
       } catch (error) {
         notifyPlannerBuilder(`Plan create failed: ${commandErrorMessage(error)}`);
@@ -1299,17 +1922,17 @@ export default function (pi: ExtensionAPI) {
     name: "plan_file_build",
     label: "Build Plan File",
     description:
-      "Run builder agents for ready tasks in a planner-created plan file. Tasks run one at a time in dependency order so each completed task can create an atomic Jujutsu commit.",
-    promptSnippet: "Run builder agents against pending tasks in a planner-created plan file.",
+      "Run builder agents on gpt-5.5 with the selected effort for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces, are integrated serially onto the main workspace, and then the verifier agent writes .pi/outputs/findings.html.",
+    promptSnippet: "Run builder agents on gpt-5.5 with the selected effort against pending tasks, then run verifier to write .pi/outputs/findings.html.",
     promptGuidelines: [
       "Use plan_file_build when the user asks builder agents to implement tasks from a plan file.",
       "Use plan_file_build only after a plan file exists, usually from plan_file_create.",
-      "plan_file_build processes tasks serially and requires one atomic Jujutsu (jj) commit before a task can report done.",
+      "plan_file_build runs independent tasks in separate Jujutsu workspaces, requires one atomic Jujutsu (jj) commit per task, integrates completed commits serially, and runs verifier at the end.",
     ],
     parameters: PlanBuildParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
-        const result = await buildPlanFile(ctx, params, signal, onUpdate);
+        const result = await buildPlanFile(ctx, { ...params, effort: getSelectedEffort() }, signal, onUpdate);
         return { content: [{ type: "text", text: result.text }], details: result.details };
       } catch (error) {
         notifyPlannerBuilder(`Plan build failed: ${commandErrorMessage(error)}`);
@@ -1333,7 +1956,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-create", {
-    description: "Run planner agent and create a plan file. Usage: /plan-create <request>",
+    description: "Run planner agent on claude-fable-5 with the selected effort and create a plan file. Usage: /plan-create <request>",
     handler: async (args, ctx) => {
       const request = args.trim() || (ctx.hasUI ? await ctx.ui.editor("Plan request:", "") : undefined);
       if (!request?.trim()) {
@@ -1359,7 +1982,7 @@ export default function (pi: ExtensionAPI) {
           }
 
           progress.update("planning...");
-          const result = await createPlanFile(ctx, { request }, undefined, (partial) => {
+          const result = await createPlanFile(ctx, { request, effort: getSelectedEffort() }, undefined, (partial) => {
             const statusText = statusTextFromUpdate(partial);
             if (statusText) progress?.update(statusText, { log: true });
           });
@@ -1389,7 +2012,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-build", {
-    description: "Run builder agents for a plan file, committing each completed task with Jujutsu. Usage: /plan-build [plan-file] [T01,T02]",
+    description: "Run builder agents on gpt-5.5 with the selected effort in parallel Jujutsu workspaces, integrate commits, then run verifier. Usage: /plan-build [plan-file] [T01,T02]",
     handler: async (args, ctx) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       let planPath = tokens.shift();
@@ -1426,7 +2049,7 @@ export default function (pi: ExtensionAPI) {
           }
 
           progress.update("building...");
-          const result = await buildPlanFile(ctx, { path: resolvedPlanPath, taskIds }, undefined, (partial) => {
+          const result = await buildPlanFile(ctx, { path: resolvedPlanPath, taskIds, effort: getSelectedEffort() }, undefined, (partial) => {
             const statusText = statusTextFromUpdate(partial);
             if (statusText) progress?.update(statusText, { log: true });
           });
@@ -1471,7 +2094,7 @@ export default function (pi: ExtensionAPI) {
     if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs tasks serially and instructs builders to create one atomic Jujutsu (jj) commit for each completed task.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable \"### Task TNN:\" blocks.`,
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces, requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable \"### Task TNN:\" blocks.`,
     };
   });
 }

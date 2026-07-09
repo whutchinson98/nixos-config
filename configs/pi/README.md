@@ -15,6 +15,6 @@ Add extensions as either:
 
 The `agent/extensions/subagent` extension registers `agent_list` and `subagent` tools so pi can list and spawn the agents in `agent/agents/`.
 
-The `agent/extensions/planner-builder` extension registers `plan_file_create`, `plan_file_build`, and `plan_file_list` tools plus `/plan-create`, `/plan-build`, and `/plan-list` commands. It uses the `planner` agent to write `.pi/plans/*.md` plan files, then runs `builder` agents against ready task blocks serially so each completed task can become an atomic Jujutsu (`jj`) commit.
+The `agent/extensions/planner-builder` extension registers `plan_file_create`, `plan_file_build`, and `plan_file_list` tools plus `/plan-create`, `/plan-build`, and `/plan-list` commands. It uses the `planner` agent on `anthropic/claude-fable-5` with the selected effort to write `.pi/plans/*.md` plan files, then runs `builder` agents on `openai-codex/gpt-5.5` with the selected effort against ready independent task blocks in parallel Jujutsu workspaces, serially integrates each atomic task commit onto the main workspace, and runs `verifier` to write `.pi/outputs/findings.html`.
 
 After rebuilding home-manager/NixOS, run `/reload` inside pi to pick up changes.
