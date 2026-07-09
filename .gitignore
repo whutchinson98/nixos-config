@@ -1,1 +1,3 @@
 .pi/plans
+.direnv/
+.envrc
