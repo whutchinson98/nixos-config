@@ -21,10 +21,10 @@
           services.openssh.enable = true;
 
           dotfiles.tailscale.sshMode = true;
-          dotfiles.tmux.prefix = "C-b";
 
           home-manager.users.hutch = {
             dotfiles.aws.credentialProvider = "default-chain";
+            dotfiles.tmux.prefix = "C-b";
 
             programs.ssh = {
               enable = true;
