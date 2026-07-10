@@ -24,6 +24,7 @@
           nixpkgs.hostPlatform = "x86_64-linux";
 
           dotfiles.tailscale.sshMode = true;
+          home-manager.users.hutch.dotfiles.aws.credentialProvider = "onepassword";
 
           # Steam's bundled 32-bit PulseAudio client crashes while enumerating this
           # AMD HDMI/DisplayPort audio device via pipewire-pulse. The system uses the

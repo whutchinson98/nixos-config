@@ -1,11 +1,20 @@
-# AWS CLI with credentials served from 1Password
+# AWS CLI with an optional 1Password credentials provider
 {
   flake.modules.homeManager.dev =
-    { pkgs, ... }:
+    {
+      config,
+      lib,
+      pkgs,
+      ...
+    }:
     let
+      cfg = config.dotfiles.aws;
+      useOnePassword = cfg.credentialProvider == "onepassword";
+
       opAwsWorkCreds = pkgs.writeShellApplication {
         name = "op-aws-work-creds";
         runtimeInputs = [
+          pkgs._1password-cli
           pkgs.jq
         ];
 
@@ -24,6 +33,7 @@
       opAwsCreds = pkgs.writeShellApplication {
         name = "op-aws-creds";
         runtimeInputs = [
+          pkgs._1password-cli
           pkgs.jq
         ];
 
@@ -41,21 +51,35 @@
       };
     in
     {
-      home.packages = [
-        opAwsCreds
-        opAwsWorkCreds
-        pkgs.awscli2
-      ];
+      options.dotfiles.aws.credentialProvider = lib.mkOption {
+        type = lib.types.enum [
+          "default-chain"
+          "onepassword"
+        ];
+        default = "default-chain";
+        description = "Credential provider to configure for AWS CLI profiles.";
+      };
 
-      home.file.".aws/config".text = ''
-        [profile work]
-        region = us-east-1
-        output = json
-        credential_process = ${opAwsWorkCreds}/bin/op-aws-work-creds
-        [profile personal]
-        region = us-east-1
-        output = json
-        credential_process = ${opAwsCreds}/bin/op-aws-creds
-      '';
+      config = {
+        home.packages = [
+          pkgs.awscli2
+        ]
+        ++ lib.optionals useOnePassword [
+          opAwsCreds
+          opAwsWorkCreds
+        ];
+
+        home.file.".aws/config".text = ''
+          [profile work]
+          region = us-east-1
+          output = json
+          ${lib.optionalString useOnePassword "credential_process = ${opAwsWorkCreds}/bin/op-aws-work-creds"}
+
+          [profile personal]
+          region = us-east-1
+          output = json
+          ${lib.optionalString useOnePassword "credential_process = ${opAwsCreds}/bin/op-aws-creds"}
+        '';
+      };
     };
 }

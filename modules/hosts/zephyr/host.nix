@@ -26,6 +26,8 @@
           nixpkgs.hostPlatform = "x86_64-linux";
 
           services.fwupd.enable = true;
+
+          home-manager.users.hutch.dotfiles.aws.credentialProvider = "onepassword";
         }
       ];
   };
