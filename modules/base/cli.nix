@@ -8,12 +8,9 @@
         wget
         curl
         git
-        wl-clipboard
         unzip
         zip
         gcc
-        lxqt.lxqt-policykit
-        pavucontrol
       ];
     };
 }

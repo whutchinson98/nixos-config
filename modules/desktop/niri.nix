@@ -3,11 +3,17 @@
 # (Niri is launched from fish loginShellInit on TTY1 — see terminal/fish.nix.)
 { inputs, config, ... }:
 {
-  flake.modules.nixos.desktop = {
-    programs.niri.enable = true;
-    security.polkit.enable = true;
-    home-manager.users.hutch.imports = [ config.flake.modules.homeManager.desktop ];
-  };
+  flake.modules.nixos.desktop =
+    { pkgs, ... }:
+    {
+      programs.niri.enable = true;
+      security.polkit.enable = true;
+      environment.systemPackages = with pkgs; [
+        wl-clipboard
+        lxqt.lxqt-policykit
+      ];
+      home-manager.users.hutch.imports = [ config.flake.modules.homeManager.desktop ];
+    };
 
   flake.modules.homeManager.desktop =
     { pkgs, ... }:
