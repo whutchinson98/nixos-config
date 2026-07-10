@@ -18,6 +18,7 @@ export interface PlanBuildAgentDetails {
   id: string;
   title: string;
   agent: string;
+  model?: string;
   status: AgentDisplayStatus;
   output: string;
   progress?: string;
@@ -62,6 +63,10 @@ function styledAgentStatus(status: AgentDisplayStatus, theme: Theme): string {
   }
 }
 
+function styledAgentModel(model: string | undefined, theme: Theme): string {
+  return model ? ` ${theme.fg("muted", `[${model}]`)}` : "";
+}
+
 function compactText(text: string, maxLength: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLength) return normalized;
@@ -98,7 +103,7 @@ export function renderPlanBuildDetails(details: PlanBuildDashboardData, expanded
     container.addChild(new Spacer(1));
     container.addChild(
       new Text(
-        `${theme.fg("muted", "── ")}${theme.fg("accent", agent.id)} ${theme.fg("toolTitle", agent.agent)} ${styledAgentStatus(agent.status, theme)}\n${theme.fg("dim", agent.title)}`,
+        `${theme.fg("muted", "── ")}${theme.fg("accent", agent.id)} ${theme.fg("toolTitle", agent.agent)}${styledAgentModel(agent.model, theme)} ${styledAgentStatus(agent.status, theme)}\n${theme.fg("dim", agent.title)}`,
         0,
         0,
       ),
@@ -209,7 +214,7 @@ export class PlanBuildDashboard {
       const selector = selected ? theme.fg("accent", ">") : " ";
       const fold = collapsed ? theme.fg("muted", "[+]") : theme.fg("accent", "[-]");
       push(
-        `${selector} ${fold} ${theme.fg("accent", agent.id)} ${theme.fg("toolTitle", agent.agent)} ${styledAgentStatus(agent.status, theme)} ${theme.fg("dim", agent.title)}`,
+        `${selector} ${fold} ${theme.fg("accent", agent.id)} ${theme.fg("toolTitle", agent.agent)}${styledAgentModel(agent.model, theme)} ${styledAgentStatus(agent.status, theme)} ${theme.fg("dim", agent.title)}`,
       );
 
       if (agent.progress) push(`    ${theme.fg("muted", compactText(agent.progress, Math.max(40, width - 4)))}`);

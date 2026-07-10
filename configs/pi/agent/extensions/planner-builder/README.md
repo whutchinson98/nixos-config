@@ -20,7 +20,7 @@ Creates planner-generated plan files and dispatches plan tasks to builder agents
 
 ## Live agent dashboard
 
-`/plan-build` and the `plan_file_build` tool show a dashboard above the editor while builders and the verifier run. Every agent starts expanded and displays its latest output. The dashboard remains available after the build so results can be inspected.
+`/plan-build` and the `plan_file_build` tool show a dashboard above the editor while builders and the verifier run. Every agent title includes the model being used, starts expanded, and displays its latest output. The dashboard remains available after the build so results can be inspected.
 
 | Shortcut | Action |
 | --- | --- |
