@@ -1,11 +1,15 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { createBashTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const INITIALIZED_ROOTS = new Set<string>();
 const NIX_BASH_ROOTS = new Set<string>();
 const SETUP_TIMEOUT_MS = 60_000;
+const REMOTE_REPOSITORIES_COMMAND = String.raw`jj git remote list \
+  | awk '{print $2}' \
+  | sed -E 's#^(git@|https://)([^/:]+)[:/]##; s#\.git$##'`;
 
 function findFlakeRoot(cwd: string): string | undefined {
   let current = path.resolve(cwd);
@@ -19,6 +23,26 @@ function findFlakeRoot(cwd: string): string | undefined {
     if (parent === current) return undefined;
     current = parent;
   }
+}
+
+async function isConfiguredWorkspace(pi: ExtensionAPI, cwd: string): Promise<boolean> {
+  const result = await pi.exec("bash", ["-lc", REMOTE_REPOSITORIES_COMMAND], {
+    cwd,
+    timeout: 5_000,
+  });
+  if (result.code !== 0) return false;
+
+  const remoteRepositories = result.stdout.split(/\r?\n/).filter(Boolean);
+  if (remoteRepositories.length === 0) return false;
+
+  const workspaceRepositoriesPath = path.join(os.homedir(), "workspace-repos");
+  if (!fs.existsSync(workspaceRepositoriesPath)) return false;
+
+  const workspaceRepositories = new Set(
+    fs.readFileSync(workspaceRepositoriesPath, "utf8").split(/\r?\n/).filter(Boolean),
+  );
+
+  return remoteRepositories.some((repository) => workspaceRepositories.has(repository));
 }
 
 function isSubagentProcess(): boolean {
@@ -100,7 +124,7 @@ function direnvSetupScript(): string {
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const flakeRoot = findFlakeRoot(ctx.cwd);
-    if (!flakeRoot) return;
+    if (!flakeRoot || !(await isConfiguredWorkspace(pi, flakeRoot))) return;
 
     registerSubagentNixBashTool(pi, ctx.cwd, flakeRoot);
 
