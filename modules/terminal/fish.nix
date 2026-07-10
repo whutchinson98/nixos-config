@@ -69,7 +69,9 @@
         set -gx RIPGREP_CONFIG_PATH $HOME/.ripgreprc
         set -gx EDITOR "hx"
 
-        set -gx SSH_AUTH_SOCK $HOME/.1password/agent.sock
+        if test -e "$HOME/.config/1Password/ssh/agent.toml"
+          set -gx SSH_AUTH_SOCK "$HOME/.1password/agent.sock"
+        end
 
         # Bun configuration
         set --export BUN_INSTALL "$HOME/.bun"
