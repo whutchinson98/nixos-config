@@ -1,5 +1,5 @@
 {
-  flake.modules.homeManager.dev =
+  flake.modules.homeManager.desktop =
     { config, pkgs, ... }:
     let
       doomConfigPath = "${config.home.homeDirectory}/nixos-config/configs/doom";
