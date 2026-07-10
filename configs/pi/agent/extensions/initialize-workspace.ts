@@ -6,6 +6,7 @@ import { createBashTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent
 
 const INITIALIZED_ROOTS = new Set<string>();
 const NIX_BASH_ROOTS = new Set<string>();
+const NIX_DEVELOP_COMMANDS = ["cargo", "bun", "npm", "pnpm", "go", "just", "doppler"] as const;
 const SETUP_TIMEOUT_MS = 60_000;
 const REMOTE_REPOSITORIES_COMMAND = String.raw`jj git remote list \
   | awk '{print $2}' \
@@ -62,16 +63,27 @@ function commandExists(command: string): boolean {
   return result.status === 0;
 }
 
+function nixDevelopCommandWrappers(flakeRoot: string): string {
+  const quotedFlakeRoot = shellQuote(flakeRoot);
+
+  return NIX_DEVELOP_COMMANDS.map(
+    (command) => `${command}() {
+  PI_SUBAGENT_NIX_DEVELOP=1 nix develop ${quotedFlakeRoot} -c ${command} "$@"
+}`,
+  ).join("\n\n");
+}
+
 function registerSubagentNixBashTool(pi: ExtensionAPI, cwd: string, flakeRoot: string): void {
   if (!isSubagentProcess() || NIX_BASH_ROOTS.has(flakeRoot) || !commandExists("nix")) return;
 
   NIX_BASH_ROOTS.add(flakeRoot);
 
+  const commandWrappers = nixDevelopCommandWrappers(flakeRoot);
   const bashTool = createBashTool(cwd, {
     spawnHook: ({ command, cwd, env }) => ({
-      command: `nix develop ${shellQuote(flakeRoot)} -c bash -lc ${shellQuote(command)}`,
+      command: `${commandWrappers}\n\n${command}`,
       cwd,
-      env: { ...env, PI_SUBAGENT_NIX_DEVELOP: "1" },
+      env,
     }),
   });
 

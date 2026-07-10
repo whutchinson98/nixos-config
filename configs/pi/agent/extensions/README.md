@@ -20,9 +20,9 @@ Extension files should default-export a function that receives `ExtensionAPI`.
 
 `initialize-workspace.ts` runs on Pi session startup. It searches from the session cwd up to the nearest `flake.nix`, normalizes the repository paths reported by `jj git remote list`, and continues only when at least one exactly matches a line in `~/workspace-repos`. For matching repositories on NixOS with `direnv` installed, it ensures `.envrc` contains `use flake` and `watch_file nix/*.nix`, then runs `direnv allow` from the flake root.
 
-Spawned agents set `PI_SUBAGENT=1`. When this extension sees that environment variable and `nix` is available, it overrides only that subprocess's `bash` tool so bash commands run through `nix develop <flake-root> -c bash -lc ...`. The main Pi process still uses its normal bash tool.
+Spawned agents set `PI_SUBAGENT=1`. When this extension sees that environment variable and `nix` is available, it overrides only that subprocess's `bash` tool with wrappers for `cargo`, `bun`, `npm`, `pnpm`, `go`, `just`, and `doppler`. Invocations of those commands run through `nix develop <flake-root> -c`; all other commands run directly. The main Pi process still uses its normal bash tool.
 
-Builder agents opt in to loading extensions so this startup hook and subagent-only bash wrapper run inside spawned builder subprocesses.
+Builder agents opt in to loading extensions so this startup hook and subagent-only command wrappers run inside spawned builder subprocesses.
 
 ## Subagents
 
