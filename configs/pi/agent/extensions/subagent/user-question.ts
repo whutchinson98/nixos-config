@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import { notify as sendSystemNotification } from "../system-notify";
 
 export const USER_QUESTION_TOOL_NAME = "ask_user";
 
@@ -178,6 +179,8 @@ export async function surfaceUserQuestion(
       message: "User interaction is unavailable in this mode. Continue with the safest reasonable assumption and document it in the plan.",
     };
   }
+
+  sendSystemNotification(request.question, "Pi planner question");
 
   const title = `Planner question: ${request.question}`;
   if (request.options.length === 0) {

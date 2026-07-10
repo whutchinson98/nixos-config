@@ -20,7 +20,7 @@ Creates planner-generated plan files and dispatches plan tasks to builder agents
 
 ## Planner questions
 
-The `planner` agent has an `ask_user` tool for decisions that materially affect scope, architecture, or implementation details. The child planner process pauses while the planner-builder extension displays suggested choices (plus a custom-answer option) in the parent pi UI, then resumes with the selected answer. Questions are recorded in the `plan_file_create` result details.
+The `planner` agent has an `ask_user` tool for decisions that materially affect scope, architecture, or implementation details. The child planner process pauses while the planner-builder extension sends a system notification and displays suggested choices (plus a custom-answer option) in the parent pi UI, then resumes with the selected answer. Questions are recorded in the `plan_file_create` result details.
 
 The planner is instructed to inspect the repository first and not ask questions the codebase can answer. If the run is non-interactive or the user cancels the dialog, the planner continues with the safest reasonable assumption and documents it in the plan.
 
@@ -77,7 +77,7 @@ Verification:
 
 Each task workspace starts from the latest integrated main-workspace head. Builders create exactly one atomic commit in their dedicated workspace. A builder watchdog runs as part of `/plan-build`: it checks each running builder attempt every 30 seconds by default, reports how long the attempt has gone without child-agent output, cancels attempts that are silent for 15 minutes by default, and restarts each stuck task once by default. The restarted builder continues in the same task workspace and is instructed to inspect existing changes before proceeding. After a builder reports `PLAN_TASK_RESULT: done`, the main loop validates that exactly one non-empty task commit exists, rebases it onto the current integrated head, checks for conflicts, and then advances the main workspace to a fresh child of the final integrated head when the build finishes. Failed, blocked, or conflicted task workspaces are kept on disk for inspection. After workspace integration finishes, the `verifier` agent reviews `main..@` and writes `.pi/outputs/findings.html`.
 
-The extension sends system notifications through `system-notify` when `/plan-create` finishes creating a plan, after each `/plan-build` task is marked `done`, `failed`, or `blocked`, and when a full plan build finishes or fails.
+The extension sends system notifications through `system-notify` when the planner asks a question, when `/plan-create` finishes creating a plan, after each `/plan-build` task is marked `done`, `failed`, or `blocked`, and when a full plan build finishes or fails.
 
 Builder agents are instructed not to edit the plan file. The extension updates each task status to `in-progress`, then `done`, `failed`, or `blocked`, and appends a builder result log to the task block. Builders must inspect `jj status`, work only inside their assigned task workspace, and create exactly one `jj commit` for the task before reporting `PLAN_TASK_RESULT: done`.
 

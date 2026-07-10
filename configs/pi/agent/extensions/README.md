@@ -33,7 +33,7 @@ Builder agents opt in to loading extensions so this startup hook and subagent-on
 | `agent_list` | List agents discovered from `~/.pi/agent/agents` and, when requested, trusted project `.pi/agents` directories. |
 | `subagent` | Spawn one or more agents in isolated `pi --mode json --no-session` subprocesses. |
 
-Subagent subprocesses use `--no-extensions` by default unless an agent frontmatter sets `includeExtensions: true`; pass `includeExtensions` to the tool to override that behavior for a specific call. If an agent's tool allowlist contains `ask_user`, the extension injects an isolated question bridge so the subprocess can pause, ask through the parent pi UI, receive the answer, and continue. Concurrent agent questions are shown one at a time.
+Subagent subprocesses use `--no-extensions` by default unless an agent frontmatter sets `includeExtensions: true`; pass `includeExtensions` to the tool to override that behavior for a specific call. If an agent's tool allowlist contains `ask_user`, the extension injects an isolated question bridge so the subprocess can pause, send a system notification, ask through the parent pi UI, receive the answer, and continue. Concurrent agent questions are announced and shown one at a time.
 
 It also registers `/agents [user|project|both]` for interactive discovery.
 
