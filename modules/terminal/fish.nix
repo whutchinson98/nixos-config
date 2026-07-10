@@ -44,7 +44,7 @@
 
       loginShellInit = ''
         # Auto-launch Niri on TTY1
-        if test (tty) = "/dev/tty1"; and not set -q WAYLAND_DISPLAY
+        if test (tty) = "/dev/tty1"; and not set -q WAYLAND_DISPLAY; and type -q niri
           systemctl --user reset-failed
           systemctl --user import-environment
           dbus-update-activation-environment --all
