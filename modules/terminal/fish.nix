@@ -1,8 +1,10 @@
 # Fish shell — system enablement (login shell for hutch) + full user config.
 # loginShellInit auto-launches Niri on TTY1.
+{ config, ... }:
 {
-  flake.modules.nixos.base = {
+  flake.modules.nixos.terminal = {
     programs.fish.enable = true;
+    home-manager.users.hutch.imports = [ config.flake.modules.homeManager.terminal ];
   };
 
   flake.modules.homeManager.terminal = {

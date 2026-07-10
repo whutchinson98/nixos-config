@@ -7,6 +7,8 @@
         base
         amd
         hutch
+        terminal
+        dev
         onepassword
         desktop
         audio

@@ -1,4 +1,5 @@
 # 1Password — desktop app, CLI, and SSH agent
+{ config, ... }:
 {
   flake.modules.nixos.onepassword = {
     programs._1password.enable = true;
@@ -6,6 +7,7 @@
       enable = true;
       polkitPolicyOwners = [ "hutch" ];
     };
+    home-manager.users.hutch.imports = [ config.flake.modules.homeManager.onepassword ];
   };
 
   flake.modules.homeManager.onepassword = {

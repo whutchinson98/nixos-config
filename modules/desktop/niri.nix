@@ -1,11 +1,12 @@
 # Niri desktop environment — Wayland compositor. System side enables the
 # compositor + polkit; home side carries the full niri configuration.
 # (Niri is launched from fish loginShellInit on TTY1 — see terminal/fish.nix.)
-{ inputs, ... }:
+{ inputs, config, ... }:
 {
   flake.modules.nixos.desktop = {
     programs.niri.enable = true;
     security.polkit.enable = true;
+    home-manager.users.hutch.imports = [ config.flake.modules.homeManager.desktop ];
   };
 
   flake.modules.homeManager.desktop =

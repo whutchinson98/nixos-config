@@ -1,10 +1,10 @@
 # User hutch — system account, Home Manager wiring, and home basics
 { inputs, config, ... }:
 {
-  # The system side owns the Home Manager integration: every module registered
-  # under flake.modules.homeManager is imported for hutch on hosts that import
-  # this module. Host-specific home tweaks go in the host file via
-  # home-manager.users.hutch.
+  # The system side owns the Home Manager integration and imports hutch's
+  # baseline home config. Other NixOS features attach their corresponding Home
+  # Manager modules when a host imports them. Host-specific home tweaks go in
+  # the host file via home-manager.users.hutch.
   flake.modules.nixos.hutch =
     { pkgs, ... }:
     {
@@ -27,7 +27,7 @@
 
       home-manager.useGlobalPkgs = true;
       home-manager.users.hutch = {
-        imports = builtins.attrValues config.flake.modules.homeManager;
+        imports = [ config.flake.modules.homeManager.hutch ];
         home.enableNixpkgsReleaseCheck = false;
       };
     };
