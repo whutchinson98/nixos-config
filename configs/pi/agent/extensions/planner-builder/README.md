@@ -6,16 +6,16 @@ Creates planner-generated plan files and dispatches plan tasks to builder agents
 
 | Command | Purpose |
 | --- | --- |
-| `/plan-create <request>` | Run the `planner` agent on `anthropic/claude-fable-5` using the currently selected effort, then write a plan file under `.pi/plans/`. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
-| `/plan-build [plan-file] [T01,T02]` | Run `builder` agents on `openai-codex/gpt-5.5` using the currently selected effort in monitored parallel Jujutsu workspaces when tasks are independent, require each completed task to create one atomic commit, integrate commits serially onto the main workspace, then run the `verifier` agent to write `.pi/outputs/findings.html`. If no file is provided, the latest `.pi/plans/*.md` file is used. A live dashboard shows every launched agent, its current activity, and its streaming output; the builder watchdog periodically reports no-output status, cancels stuck attempts, and restarts them up to the configured limit. The result or failure is posted when complete. |
+| `/plan-create <request>` | Run the `planner` agent using the model and effort currently selected in the main pi process, then write a plan file under `.pi/plans/`. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
+| `/plan-build [plan-file] [T01,T02]` | Run `builder` agents using the model and effort currently selected in the main pi process in monitored parallel Jujutsu workspaces when tasks are independent, require each completed task to create one atomic commit, integrate commits serially onto the main workspace, then run the `verifier` agent with the same selection to write `.pi/outputs/findings.html`. If no file is provided, the latest `.pi/plans/*.md` file is used. A live dashboard shows every launched agent, its current activity, and its streaming output; the builder watchdog periodically reports no-output status, cancels stuck attempts, and restarts them up to the configured limit. The result or failure is posted when complete. |
 | `/plan-list` | List recent plan files. |
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `plan_file_create` | LLM-callable tool that runs a planner agent on `anthropic/claude-fable-5` with the selected effort and saves a structured plan file. |
-| `plan_file_build` | LLM-callable tool that runs builder agents on `openai-codex/gpt-5.5` with the selected effort against pending plan tasks in monitored parallel workspaces, cancels/restarts stuck builder attempts, serially integrates atomic per-task `jj` commits, then runs the `verifier` agent to write `.pi/outputs/findings.html`. |
+| `plan_file_create` | LLM-callable tool that runs a planner agent with the model and effort selected in the main pi process and saves a structured plan file. |
+| `plan_file_build` | LLM-callable tool that runs builder agents with the model and effort selected in the main pi process against pending plan tasks in monitored parallel workspaces, cancels/restarts stuck builder attempts, serially integrates atomic per-task `jj` commits, then runs the `verifier` agent with the same selection to write `.pi/outputs/findings.html`. |
 | `plan_file_list` | Lists recent plan files. |
 
 ## Live agent dashboard

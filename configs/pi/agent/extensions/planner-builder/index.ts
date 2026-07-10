@@ -34,8 +34,6 @@ import {
 const DEFAULT_PLANNER_AGENT = "planner";
 const DEFAULT_BUILDER_AGENT = "builder";
 const DEFAULT_VERIFIER_AGENT = "verifier";
-const PLAN_CREATE_MODEL = "anthropic/claude-fable-5";
-const PLAN_BUILD_MODEL = "openai-codex/gpt-5.5";
 const EFFORT_STATE_EVENT = "pi:effort-state";
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 const DEFAULT_PLAN_DIR = ".pi/plans";
@@ -1182,7 +1180,8 @@ async function createPlanFile(
     agentScope?: AgentScope;
     overwrite?: boolean;
     confirmProjectAgents?: boolean;
-    effort?: SelectedEffort;
+    model: string;
+    effort: SelectedEffort;
   },
   signal?: AbortSignal,
   onUpdate?: OnUpdateCallback<PlanCreateDetails>,
@@ -1192,7 +1191,8 @@ async function createPlanFile(
 
   const plannerAgent = params.plannerAgent?.trim() || DEFAULT_PLANNER_AGENT;
   const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
-  const effort = params.effort ?? "off";
+  const model = params.model;
+  const effort = params.effort;
   const agentScope = params.agentScope ?? "user";
   const discovery = discoverAgents(ctx.cwd, agentScope);
   const agents = discovery.agents;
@@ -1215,7 +1215,7 @@ async function createPlanFile(
   }
 
   onUpdate?.({
-    content: [{ type: "text", text: `Running ${plannerAgent} on ${PLAN_CREATE_MODEL} (${effort} effort) to create ${relativePath}...` }],
+    content: [{ type: "text", text: `Running ${plannerAgent} on ${model} (${effort} effort) to create ${relativePath}...` }],
     details,
   });
 
@@ -1224,14 +1224,14 @@ async function createPlanFile(
     agents,
     plannerAgent,
     createPlannerTask(request, builderAgent),
-    { model: PLAN_CREATE_MODEL, effort },
+    { model, effort },
     signal,
     (result) => {
       const status = result.finalOutput
         ? `Planner output received for ${relativePath}.`
         : result.progressMessage
           ? `${result.progressMessage} Creating ${relativePath}.`
-          : `Running ${plannerAgent} on ${PLAN_CREATE_MODEL} (${effort} effort) to create ${relativePath}...`;
+          : `Running ${plannerAgent} on ${model} (${effort} effort) to create ${relativePath}...`;
 
       onUpdate?.({
         content: [{ type: "text", text: status }],
@@ -1406,6 +1406,7 @@ function createFailedAgentResult(
   task: string,
   cwd: string,
   message: string,
+  model: string,
   effort: SelectedEffort,
 ): AgentRunResult {
   return {
@@ -1417,7 +1418,7 @@ function createFailedAgentResult(
     finalOutput: "",
     stderr: message,
     usage: emptyUsage(),
-    model: PLAN_BUILD_MODEL,
+    model,
     effort,
   };
 }
@@ -1719,7 +1720,8 @@ async function buildPlanFile(
     builderStuckTimeoutSeconds?: number;
     builderMaxRestarts?: number;
     confirmProjectAgents?: boolean;
-    effort?: SelectedEffort;
+    model: string;
+    effort: SelectedEffort;
   },
   signal?: AbortSignal,
   onUpdate?: OnUpdateCallback<PlanBuildDetails>,
@@ -1728,7 +1730,8 @@ async function buildPlanFile(
   const relativePath = displayPath(ctx.cwd, absolutePath);
   const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
   const verifierAgent = params.verifierAgent?.trim() || DEFAULT_VERIFIER_AGENT;
-  const effort = params.effort ?? "off";
+  const model = params.model;
+  const effort = params.effort;
   const agentScope = params.agentScope ?? "user";
   const maxConcurrency = Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(params.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY)));
   const monitor = normalizeBuilderMonitorConfig(params);
@@ -1806,7 +1809,7 @@ async function buildPlanFile(
       content: [
         {
           type: "text",
-          text: `Running ${batch.length} of ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) in parallel workspaces; ${monitorSummary}...`,
+          text: `Running ${batch.length} of ${ready.length} ready task${ready.length === 1 ? "" : "s"} from ${relativePath} with ${builderAgent} on ${model} (${effort} effort) in parallel workspaces; ${monitorSummary}...`,
         },
       ],
       details: detailsFor(),
@@ -1854,12 +1857,12 @@ async function buildPlanFile(
           agents,
           builderAgent,
           launch.prompt,
-          { model: PLAN_BUILD_MODEL, effort, monitor },
+          { model, effort, monitor },
           signal,
           (agentResult) => {
             const status = agentResult.progressMessage
               ? `${launch.task.id}: ${agentResult.progressMessage}`
-              : `${launch.task.id}: ${builderAgent} is running on ${PLAN_BUILD_MODEL} (${effort} effort) in ${launch.workspace.name}...`;
+              : `${launch.task.id}: ${builderAgent} is running on ${model} (${effort} effort) in ${launch.workspace.name}...`;
 
             updateAgentView(launch.task.id, {
               status: "running",
@@ -1898,7 +1901,7 @@ async function buildPlanFile(
           },
         };
       } catch (error) {
-        const run = createFailedAgentResult(builderAgent, launch.prompt, launch.workspace.cwd, commandErrorMessage(error), effort);
+        const run = createFailedAgentResult(builderAgent, launch.prompt, launch.workspace.cwd, commandErrorMessage(error), model, effort);
         updateAgentView(launch.task.id, {
           status: "failed",
           output: agentOutput(run),
@@ -1985,7 +1988,7 @@ async function buildPlanFile(
     progress: "Starting verifier agent...",
   });
   onUpdate?.({
-    content: [{ type: "text", text: `Running ${verifierAgent} on ${PLAN_BUILD_MODEL} (${effort} effort) to verify completed plan build...` }],
+    content: [{ type: "text", text: `Running ${verifierAgent} on ${model} (${effort} effort) to verify completed plan build...` }],
     details: detailsFor(),
   });
 
@@ -1994,7 +1997,7 @@ async function buildPlanFile(
     agents,
     verifierAgent,
     createVerifierTask(relativePath, results),
-    { model: PLAN_BUILD_MODEL, effort },
+    { model, effort },
     signal,
     (agentResult) => {
       const status = agentResult.progressMessage
@@ -2119,6 +2122,11 @@ function isThinkingLevel(value: unknown): value is ThinkingLevel {
 
 function normalizeThinkingLevel(value: string): ThinkingLevel {
   return isThinkingLevel(value) ? value : "off";
+}
+
+function getSelectedModel(ctx: ExtensionContext): string {
+  if (!ctx.model) throw new Error("No model is selected in the main pi process.");
+  return `${ctx.model.provider}/${ctx.model.id}`;
 }
 
 async function notifyCommandError(ctx: ExtensionContext, error: unknown): Promise<void> {
@@ -2328,8 +2336,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "plan_file_create",
     label: "Create Plan File",
-    description: "Run the planner agent on claude-fable-5 with the selected effort and save a structured plan file with builder task blocks.",
-    promptSnippet: "Run planner agent on claude-fable-5 with the selected effort and write a multi-builder plan file under .pi/plans.",
+    description: "Run the planner agent with the model and effort selected in the main pi process, then save a structured plan file with builder task blocks.",
+    promptSnippet: "Run the planner agent with the current model and effort and write a multi-builder plan file under .pi/plans.",
     promptGuidelines: [
       "Use plan_file_create when the user asks to create a planner-generated plan file for builder agents.",
       "Use plan_file_build after plan_file_create when the user asks multiple builder agents to implement plan tasks.",
@@ -2337,7 +2345,12 @@ export default function (pi: ExtensionAPI) {
     parameters: PlanCreateParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
-        const result = await createPlanFile(ctx, { ...params, effort: getSelectedEffort() }, signal, onUpdate);
+        const result = await createPlanFile(
+          ctx,
+          { ...params, model: getSelectedModel(ctx), effort: getSelectedEffort() },
+          signal,
+          onUpdate,
+        );
         return { content: [{ type: "text", text: result.text }], details: result.details };
       } catch (error) {
         notifyPlannerBuilder(`Plan create failed: ${commandErrorMessage(error)}`);
@@ -2350,8 +2363,8 @@ export default function (pi: ExtensionAPI) {
     name: "plan_file_build",
     label: "Build Plan File",
     description:
-      "Run builder agents on gpt-5.5 with the selected effort for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces under a builder watchdog that cancels/restarts stuck attempts, are integrated serially onto the main workspace, and then the verifier agent writes .pi/outputs/findings.html.",
-    promptSnippet: "Run builder agents on gpt-5.5 with watchdog monitoring against pending tasks, then run verifier to write .pi/outputs/findings.html.",
+      "Run builder agents with the model and effort selected in the main pi process for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces under a builder watchdog that cancels/restarts stuck attempts, are integrated serially onto the main workspace, and then the verifier agent writes .pi/outputs/findings.html.",
+    promptSnippet: "Run builder agents with the current model and effort and watchdog monitoring against pending tasks, then run verifier to write .pi/outputs/findings.html.",
     promptGuidelines: [
       "Use plan_file_build when the user asks builder agents to implement tasks from a plan file.",
       "Use plan_file_build only after a plan file exists, usually from plan_file_create.",
@@ -2361,10 +2374,15 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const dashboard = startBuildDashboard(ctx, params.path);
       try {
-        const result = await buildPlanFile(ctx, { ...params, effort: getSelectedEffort() }, signal, (partial) => {
-          dashboard.update(partial.details);
-          onUpdate?.(partial);
-        });
+        const result = await buildPlanFile(
+          ctx,
+          { ...params, model: getSelectedModel(ctx), effort: getSelectedEffort() },
+          signal,
+          (partial) => {
+            dashboard.update(partial.details);
+            onUpdate?.(partial);
+          },
+        );
         dashboard.update(result.details);
         return { content: [{ type: "text", text: result.text }], details: result.details };
       } catch (error) {
@@ -2410,7 +2428,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-create", {
-    description: "Run planner agent on claude-fable-5 with the selected effort and create a plan file. Usage: /plan-create <request>",
+    description: "Run the planner agent with the current model and effort and create a plan file. Usage: /plan-create <request>",
     handler: async (args, ctx) => {
       const request = args.trim() || (ctx.hasUI ? await ctx.ui.editor("Plan request:", "") : undefined);
       if (!request?.trim()) {
@@ -2436,10 +2454,15 @@ export default function (pi: ExtensionAPI) {
           }
 
           progress.update("planning...");
-          const result = await createPlanFile(ctx, { request, effort: getSelectedEffort() }, undefined, (partial) => {
-            const statusText = statusTextFromUpdate(partial);
-            if (statusText) progress?.update(statusText, { log: true });
-          });
+          const result = await createPlanFile(
+            ctx,
+            { request, model: getSelectedModel(ctx), effort: getSelectedEffort() },
+            undefined,
+            (partial) => {
+              const statusText = statusTextFromUpdate(partial);
+              if (statusText) progress?.update(statusText, { log: true });
+            },
+          );
           pi.sendMessage({ customType: "planner-builder", content: result.text, display: true, details: result.details });
           ctx.ui.notify(result.text, "info");
         } catch (error) {
@@ -2466,7 +2489,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-build", {
-    description: "Run builder agents on gpt-5.5 with the selected effort in monitored parallel Jujutsu workspaces, integrate commits, then run verifier. Usage: /plan-build [plan-file] [T01,T02]",
+    description: "Run builder agents with the current model and effort in monitored parallel Jujutsu workspaces, integrate commits, then run verifier. Usage: /plan-build [plan-file] [T01,T02]",
     handler: async (args, ctx) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       let planPath = tokens.shift();
@@ -2503,11 +2526,16 @@ export default function (pi: ExtensionAPI) {
 
           dashboard = startBuildDashboard(ctx, resolvedPlanPath);
           progress.update("building...");
-          const result = await buildPlanFile(ctx, { path: resolvedPlanPath, taskIds, effort: getSelectedEffort() }, undefined, (partial) => {
-            dashboard?.update(partial.details);
-            const statusText = statusTextFromUpdate(partial);
-            if (statusText) progress?.update(statusText, { log: true });
-          });
+          const result = await buildPlanFile(
+            ctx,
+            { path: resolvedPlanPath, taskIds, model: getSelectedModel(ctx), effort: getSelectedEffort() },
+            undefined,
+            (partial) => {
+              dashboard?.update(partial.details);
+              const statusText = statusTextFromUpdate(partial);
+              if (statusText) progress?.update(statusText, { log: true });
+            },
+          );
           dashboard.update(result.details);
           pi.sendMessage({ customType: "planner-builder", content: result.text, display: true, details: result.details });
           ctx.ui.notify(`Plan build finished for ${resolvedPlanPath}.`, "info");
