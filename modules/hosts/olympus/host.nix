@@ -23,8 +23,6 @@
           networking.hostName = "olympus";
           nixpkgs.hostPlatform = "x86_64-linux";
 
-          services.openssh.enable = true;
-
           dotfiles.tailscale.sshMode = true;
 
           # Steam's bundled 32-bit PulseAudio client crashes while enumerating this
