@@ -33,7 +33,7 @@ Builder agents opt in to loading extensions so this startup hook and subagent-on
 | `agent_list` | List agents discovered from `~/.pi/agent/agents` and, when requested, trusted project `.pi/agents` directories. |
 | `subagent` | Spawn one or more agents in isolated `pi --mode json --no-session` subprocesses. |
 
-Subagent subprocesses use `--no-extensions` by default unless an agent frontmatter sets `includeExtensions: true`; pass `includeExtensions` to the tool to override that behavior for a specific call.
+Subagent subprocesses use `--no-extensions` by default unless an agent frontmatter sets `includeExtensions: true`; pass `includeExtensions` to the tool to override that behavior for a specific call. If an agent's tool allowlist contains `ask_user`, the extension injects an isolated question bridge so the subprocess can pause, ask through the parent pi UI, receive the answer, and continue. Concurrent agent questions are shown one at a time.
 
 It also registers `/agents [user|project|both]` for interactive discovery.
 
@@ -43,7 +43,7 @@ It also registers `/agents [user|project|both]` for interactive discovery.
 
 | Tool | Purpose |
 | --- | --- |
-| `plan_file_create` | Run the `planner` agent with the model and effort selected in the main pi process and save a structured plan file under `.pi/plans`. |
+| `plan_file_create` | Run the `planner` agent with the model and effort selected in the main pi process, surface material planner questions through the parent UI, and save a structured plan file under `.pi/plans`. |
 | `plan_file_build` | Run `builder` agents with the model and effort selected in the main pi process for ready independent tasks in parallel Jujutsu workspaces, show all live agent outputs in a collapsible dashboard, serially integrate each atomic `jj` commit, then run `verifier` with the same selection to write `.pi/outputs/findings.html`. |
 | `plan_file_list` | List recent plan files. |
 

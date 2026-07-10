@@ -20,6 +20,16 @@ import {
   discoverAgents,
   formatAgentList,
 } from "../subagent/agents";
+import {
+  createUserQuestionBridge,
+  parseUserQuestion,
+  surfaceUserQuestion,
+  USER_QUESTION_TOOL_NAME,
+  type UserQuestionBridge,
+  type UserQuestionHandler,
+  type UserQuestionResponse,
+  writeUserQuestionResponse,
+} from "../subagent/user-question";
 import { notify as sendSystemNotification } from "../system-notify";
 import {
   hidePlanBuildDashboard,
@@ -106,6 +116,7 @@ interface AgentRunOptions {
   monitor?: BuilderMonitorConfig;
   attempt?: number;
   maxAttempts?: number;
+  userQuestionHandler?: UserQuestionHandler;
 }
 
 interface AgentProcessEvent {
@@ -113,6 +124,7 @@ interface AgentProcessEvent {
   message?: Message;
   messages?: Message[];
   assistantMessageEvent?: { delta?: unknown };
+  toolCallId?: string;
   toolName?: string;
   args?: unknown;
   isError?: boolean;
@@ -135,6 +147,11 @@ interface PlanCreateDetails {
   builderAgent: string;
   taskCount: number;
   warnings: string[];
+  questions: Array<{
+    question: string;
+    status: UserQuestionResponse["status"] | "pending";
+    answer?: string;
+  }>;
 }
 
 interface PlanBuildResult {
@@ -529,6 +546,9 @@ function createPlannerTask(request: string, builderAgent: string): string {
     "",
     "Requirements:",
     "- Analyze the actual repository before planning.",
+    `- Use the \`${USER_QUESTION_TOOL_NAME}\` tool when a user decision would materially change scope, architecture, or implementation details. Investigate first and do not ask questions the repository can answer.`,
+    "- Ask one concise question at a time and include a small set of likely options when useful.",
+    "- If user interaction is unavailable or cancelled, proceed with the safest reasonable assumption and state it in the plan.",
     "- Do not modify files.",
     "- Output markdown only; do not wrap the plan in a code fence.",
     "- Split work into small, builder-sized tasks that can be run independently when possible.",
@@ -835,9 +855,15 @@ async function runAgent(
 
   let promptDir: string | undefined;
   let maxEffortExtensionDir: string | undefined;
+  let userQuestionBridge: UserQuestionBridge | undefined;
   const messages: Message[] = [];
 
   try {
+    if (options.userQuestionHandler && agent.tools?.includes(USER_QUESTION_TOOL_NAME)) {
+      userQuestionBridge = await createUserQuestionBridge();
+      args.push("--extension", userQuestionBridge.extensionPath);
+    }
+
     if (options.effort === "max") {
       const extension = await writeMaxEffortExtensionToTempFile();
       maxEffortExtensionDir = extension.dir;
@@ -861,6 +887,11 @@ async function runAgent(
     let lastActivityAt = Date.now();
     let lastProgress = `${progressAgentName} process spawned.`;
     let assistantDraft = "";
+    let pendingQuestionWork = Promise.resolve();
+    const questionAbortController = new AbortController();
+    const forwardQuestionAbort = () => questionAbortController.abort();
+    if (signal?.aborted) questionAbortController.abort();
+    else signal?.addEventListener("abort", forwardQuestionAbort, { once: true });
 
     const emitOutput = (force = false, childActivity = false) => {
       if (childActivity) {
@@ -888,8 +919,41 @@ async function runAgent(
           ...process.env,
           PI_SUBAGENT: "1",
           PI_SUBAGENT_NAME: agent.name,
+          ...(userQuestionBridge ? { PI_USER_QUESTION_BRIDGE_DIR: userQuestionBridge.dir } : {}),
         },
       });
+
+      const enqueueUserQuestion = (event: AgentProcessEvent) => {
+        if (
+          !userQuestionBridge ||
+          !options.userQuestionHandler ||
+          event.toolName !== USER_QUESTION_TOOL_NAME ||
+          !event.toolCallId
+        ) {
+          return false;
+        }
+
+        const request = parseUserQuestion(event.toolCallId, event.args);
+        pendingQuestionWork = pendingQuestionWork
+          .then(async () => {
+            let response: UserQuestionResponse;
+            try {
+              response = await options.userQuestionHandler?.(request, questionAbortController.signal) ?? {
+                status: "unavailable",
+                message: "User interaction is unavailable; continue with the safest reasonable assumption.",
+              };
+            } catch (error) {
+              response = { status: "error", message: `Could not ask the user: ${commandErrorMessage(error)}` };
+            }
+
+            await writeUserQuestionResponse(userQuestionBridge.dir, request.toolCallId, response);
+          })
+          .catch((error) => {
+            result.stderr = appendStderrTail(result.stderr, `Question bridge failed: ${commandErrorMessage(error)}\n`);
+            signalSpawnedProcess(proc, "SIGTERM");
+          });
+        return true;
+      };
 
       const processLine = (line: string) => {
         if (!line.trim()) return;
@@ -936,7 +1000,12 @@ async function runAgent(
         }
 
         if (event.type === "tool_execution_start") {
-          result.progressMessage = `${progressAgentName} is running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
+          if (enqueueUserQuestion(event)) {
+            const request = parseUserQuestion(event.toolCallId ?? "question", event.args);
+            result.progressMessage = `${progressAgentName} is waiting for user input: ${truncateInline(request.question, 90)}`;
+          } else {
+            result.progressMessage = `${progressAgentName} is running ${event.toolName ?? "tool"}${formatToolArgs(event.args)}...`;
+          }
           emitOutput(true, true);
           return;
         }
@@ -1023,6 +1092,8 @@ async function runAgent(
         if (killTimer) clearTimeout(killTimer);
         if (monitorTimer) clearInterval(monitorTimer);
         abortCleanup?.();
+        questionAbortController.abort();
+        signal?.removeEventListener("abort", forwardQuestionAbort);
         resolve(code ?? 0);
       });
 
@@ -1062,6 +1133,8 @@ async function runAgent(
       }
     });
 
+    await pendingQuestionWork;
+
     if (terminationReason === "aborted") {
       result.stopReason = "aborted";
       result.errorMessage = "Agent run was aborted.";
@@ -1073,7 +1146,7 @@ async function runAgent(
 
     return result;
   } finally {
-    for (const tempDir of [promptDir, maxEffortExtensionDir]) {
+    for (const tempDir of [promptDir, maxEffortExtensionDir, userQuestionBridge?.dir]) {
       if (!tempDir) continue;
 
       try {
@@ -1204,6 +1277,7 @@ async function createPlanFile(
     builderAgent,
     taskCount: 0,
     warnings: [],
+    questions: [],
   };
 
   findAgentOrThrow(agents, plannerAgent);
@@ -1224,7 +1298,43 @@ async function createPlanFile(
     agents,
     plannerAgent,
     createPlannerTask(request, builderAgent),
-    { model, effort },
+    {
+      model,
+      effort,
+      userQuestionHandler: async (question, questionSignal) => {
+        const questionDetails: PlanCreateDetails["questions"][number] = {
+          question: question.question,
+          status: "pending",
+        };
+        details.questions.push(questionDetails);
+        onUpdate?.({
+          content: [{ type: "text", text: `Planner is waiting for user input: ${truncateInline(question.question, 120)}` }],
+          details,
+        });
+
+        let response: UserQuestionResponse;
+        try {
+          response = await surfaceUserQuestion(ctx, question, questionSignal);
+        } catch (error) {
+          response = { status: "error", message: `Could not ask the user: ${commandErrorMessage(error)}` };
+        }
+
+        questionDetails.status = response.status;
+        questionDetails.answer = response.answer;
+        onUpdate?.({
+          content: [
+            {
+              type: "text",
+              text: response.status === "answered"
+                ? "Planner received the user's answer and resumed planning."
+                : `Planner question ${response.status}; continuing with a documented assumption.`,
+            },
+          ],
+          details,
+        });
+        return response;
+      },
+    },
     signal,
     (result) => {
       const status = result.finalOutput
@@ -2338,13 +2448,14 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "plan_file_create",
     label: "Create Plan File",
-    description: "Run the planner agent with the model and effort selected in the main pi process, then save a structured plan file with builder task blocks.",
-    promptSnippet: "Run the planner agent with the current model and effort and write a multi-builder plan file under .pi/plans.",
+    description: "Run the planner agent with the model and effort selected in the main pi process, surface material planner questions through the parent UI, then save a structured plan file with builder task blocks.",
+    promptSnippet: "Run the planner agent with the current model and effort, surface material questions, and write a multi-builder plan file under .pi/plans.",
     promptGuidelines: [
       "Use plan_file_create when the user asks to create a planner-generated plan file for builder agents.",
       "Use plan_file_build after plan_file_create when the user asks multiple builder agents to implement plan tasks.",
     ],
     parameters: PlanCreateParams,
+    executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
         const result = await createPlanFile(
@@ -2430,7 +2541,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-create", {
-    description: "Run the planner agent with the current model and effort and create a plan file. Usage: /plan-create <request>",
+    description: "Run the planner agent with the current model and effort, surface material questions, and create a plan file. Usage: /plan-create <request>",
     handler: async (args, ctx) => {
       const request = args.trim() || (ctx.hasUI ? await ctx.ui.editor("Plan request:", "") : undefined);
       if (!request?.trim()) {
@@ -2581,7 +2692,7 @@ export default function (pi: ExtensionAPI) {
     if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- plan_file_create can pause to surface material planner questions through the parent pi UI and resume with the user's answers.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
     };
   });
 }

@@ -6,7 +6,7 @@ Creates planner-generated plan files and dispatches plan tasks to builder agents
 
 | Command | Purpose |
 | --- | --- |
-| `/plan-create <request>` | Run the `planner` agent using the model and effort currently selected in the main pi process, then write a plan file under `.pi/plans/`. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
+| `/plan-create <request>` | Run the `planner` agent using the model and effort currently selected in the main pi process, surface material planner questions through the parent pi UI, then write a plan file under `.pi/plans/`. Child-agent activity is shown in the status bar and streamed into the main message area while the run is active; the result or failure is posted when complete. |
 | `/plan-build [plan-file] [T01,T02]` | Run `builder` agents using the model and effort currently selected in the main pi process in monitored parallel Jujutsu workspaces when tasks are independent, require each completed task to create one atomic commit, integrate commits serially onto the main workspace, then run the `verifier` agent with the same selection to write `.pi/outputs/findings.html`. If no file is provided, the latest `.pi/plans/*.md` file is used. A live dashboard shows every launched agent, its current activity, and its streaming output; the builder watchdog periodically reports no-output status, cancels stuck attempts, and restarts them up to the configured limit. The result or failure is posted when complete. |
 | `/plan-list` | List recent plan files. |
 
@@ -14,9 +14,15 @@ Creates planner-generated plan files and dispatches plan tasks to builder agents
 
 | Tool | Purpose |
 | --- | --- |
-| `plan_file_create` | LLM-callable tool that runs a planner agent with the model and effort selected in the main pi process and saves a structured plan file. |
+| `plan_file_create` | LLM-callable tool that runs a planner agent with the model and effort selected in the main pi process, surfaces material planner questions through the parent pi UI, and saves a structured plan file. |
 | `plan_file_build` | LLM-callable tool that runs builder agents with the model and effort selected in the main pi process against pending plan tasks in monitored parallel workspaces, cancels/restarts stuck builder attempts, serially integrates atomic per-task `jj` commits, then runs the `verifier` agent with the same selection to write `.pi/outputs/findings.html`. |
 | `plan_file_list` | Lists recent plan files. |
+
+## Planner questions
+
+The `planner` agent has an `ask_user` tool for decisions that materially affect scope, architecture, or implementation details. The child planner process pauses while the planner-builder extension displays suggested choices (plus a custom-answer option) in the parent pi UI, then resumes with the selected answer. Questions are recorded in the `plan_file_create` result details.
+
+The planner is instructed to inspect the repository first and not ask questions the codebase can answer. If the run is non-interactive or the user cancels the dialog, the planner continues with the safest reasonable assumption and documents it in the plan.
 
 ## Live agent dashboard
 

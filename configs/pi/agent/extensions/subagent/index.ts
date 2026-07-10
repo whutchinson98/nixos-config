@@ -6,6 +6,17 @@ import type { Message } from "@mariozechner/pi-ai";
 import { StringEnum, Type } from "@mariozechner/pi-ai";
 import { formatSize, truncateHead, type ExtensionAPI, withFileMutationQueue } from "@mariozechner/pi-coding-agent";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents";
+import {
+  createUserQuestionBridge,
+  parseUserQuestion,
+  removeUserQuestionBridge,
+  surfaceUserQuestion,
+  USER_QUESTION_TOOL_NAME,
+  type UserQuestionBridge,
+  type UserQuestionHandler,
+  type UserQuestionResponse,
+  writeUserQuestionResponse,
+} from "./user-question";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -34,6 +45,15 @@ interface AgentRunResult {
   stopReason?: string;
   errorMessage?: string;
   step?: number;
+}
+
+interface AgentProcessEvent {
+  type?: string;
+  message?: Message;
+  messages?: Message[];
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
 }
 
 interface SubagentDetails {
@@ -243,6 +263,7 @@ async function runSingleAgent(
   cwd: string | undefined,
   step: number | undefined,
   includeExtensions: boolean,
+  userQuestionHandler: UserQuestionHandler,
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: AgentRunResult[]) => SubagentDetails,
@@ -271,6 +292,7 @@ async function runSingleAgent(
   if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 
   let promptDir: string | undefined;
+  let userQuestionBridge: UserQuestionBridge | undefined;
   const messages: Message[] = [];
   const result: AgentRunResult = {
     agent: agent.name,
@@ -293,6 +315,11 @@ async function runSingleAgent(
   };
 
   try {
+    if (agent.tools?.includes(USER_QUESTION_TOOL_NAME)) {
+      userQuestionBridge = await createUserQuestionBridge();
+      args.push("--extension", userQuestionBridge.extensionPath);
+    }
+
     if (agent.systemPrompt.trim()) {
       const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
       promptDir = prompt.dir;
@@ -305,6 +332,11 @@ async function runSingleAgent(
     let wasAborted = false;
     let abortCleanup: (() => void) | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingQuestionWork = Promise.resolve();
+    const questionAbortController = new AbortController();
+    const forwardQuestionAbort = () => questionAbortController.abort();
+    if (signal?.aborted) questionAbortController.abort();
+    else signal?.addEventListener("abort", forwardQuestionAbort, { once: true });
 
     result.exitCode = await new Promise<number>((resolve) => {
       const invocation = getPiInvocation(args);
@@ -317,16 +349,46 @@ async function runSingleAgent(
           ...process.env,
           PI_SUBAGENT: "1",
           PI_SUBAGENT_NAME: agent.name,
+          ...(userQuestionBridge ? { PI_USER_QUESTION_BRIDGE_DIR: userQuestionBridge.dir } : {}),
         },
       });
+
+      const enqueueUserQuestion = (event: AgentProcessEvent) => {
+        if (!userQuestionBridge || event.toolName !== USER_QUESTION_TOOL_NAME || !event.toolCallId) return;
+
+        const request = parseUserQuestion(event.toolCallId, event.args);
+        pendingQuestionWork = pendingQuestionWork
+          .then(async () => {
+            let response: UserQuestionResponse;
+            try {
+              response = await userQuestionHandler(request, questionAbortController.signal);
+            } catch (error) {
+              response = { status: "error", message: `Could not ask the user: ${error instanceof Error ? error.message : String(error)}` };
+            }
+
+            await writeUserQuestionResponse(userQuestionBridge.dir, request.toolCallId, response);
+          })
+          .catch((error) => {
+            result.stderr = appendStderrTail(
+              result.stderr,
+              `Question bridge failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+            proc.kill("SIGTERM");
+          });
+      };
 
       const processLine = (line: string) => {
         if (!line.trim()) return;
 
-        let event: any;
+        let event: AgentProcessEvent;
         try {
-          event = JSON.parse(line);
+          event = JSON.parse(line) as AgentProcessEvent;
         } catch {
+          return;
+        }
+
+        if (event.type === "tool_execution_start") {
+          enqueueUserQuestion(event);
           return;
         }
 
@@ -372,6 +434,8 @@ async function runSingleAgent(
         if (stdoutBuffer.trim()) processLine(stdoutBuffer);
         if (killTimer) clearTimeout(killTimer);
         abortCleanup?.();
+        questionAbortController.abort();
+        signal?.removeEventListener("abort", forwardQuestionAbort);
         resolve(code ?? 0);
       });
 
@@ -392,6 +456,8 @@ async function runSingleAgent(
       }
     });
 
+    await pendingQuestionWork;
+
     if (wasAborted) {
       result.stopReason = "aborted";
       result.errorMessage = "Subagent was aborted.";
@@ -405,6 +471,12 @@ async function runSingleAgent(
       } catch {
         // Ignore cleanup failures.
       }
+    }
+
+    try {
+      await removeUserQuestionBridge(userQuestionBridge);
+    } catch {
+      // Ignore cleanup failures.
     }
   }
 }
@@ -478,6 +550,7 @@ export default function (pi: ExtensionAPI) {
       'Default agentScope is "user", which loads ~/.pi/agent/agents.',
       'Only set agentScope to "project" or "both" for trusted repositories or when the user explicitly asks for project-local agents.',
       "Subagent subprocesses disable extensions by default to avoid recursive agents and extension side effects, unless an agent opts in with includeExtensions frontmatter or the tool call passes includeExtensions.",
+      `Agents whose tool allowlist includes ${USER_QUESTION_TOOL_NAME} receive an isolated bridge that surfaces their questions through the parent pi UI.`,
     ].join(" "),
     promptSnippet: "Delegate work to specialized pi agents from ~/.pi/agent/agents using isolated pi subprocesses.",
     promptGuidelines: [
@@ -487,6 +560,7 @@ export default function (pi: ExtensionAPI) {
       "Do not call subagent in the same parallel tool batch as edit, write, or bash file mutations; wait for the subagent result before making additional local changes.",
     ],
     parameters: SubagentParams,
+    executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = params.agentScope ?? "user";
       const discovery = discoverAgents(ctx.cwd, agentScope);
@@ -504,6 +578,15 @@ export default function (pi: ExtensionAPI) {
         projectAgentsDir: discovery.projectAgentsDir,
         results,
       });
+      let userQuestionQueue: Promise<void> = Promise.resolve();
+      const userQuestionHandler: UserQuestionHandler = (request, questionSignal) => {
+        const pending = userQuestionQueue.then(() => surfaceUserQuestion(ctx, request, questionSignal));
+        userQuestionQueue = pending.then(
+          () => undefined,
+          () => undefined,
+        );
+        return pending;
+      };
 
       if (modeCount !== 1) {
         return {
@@ -566,6 +649,7 @@ export default function (pi: ExtensionAPI) {
             step.cwd,
             index + 1,
             shouldIncludeExtensions(agents, step.agent, params.includeExtensions),
+            userQuestionHandler,
             signal,
             update,
             makeDetails,
@@ -631,6 +715,7 @@ export default function (pi: ExtensionAPI) {
             task.cwd,
             undefined,
             shouldIncludeExtensions(agents, task.agent, params.includeExtensions),
+            userQuestionHandler,
             signal,
             (partial) => {
               const current = partial.details.results[0];
@@ -673,6 +758,7 @@ export default function (pi: ExtensionAPI) {
           params.cwd,
           undefined,
           shouldIncludeExtensions(agents, params.agent, params.includeExtensions),
+          userQuestionHandler,
           signal,
           onUpdate,
           makeDetails,
