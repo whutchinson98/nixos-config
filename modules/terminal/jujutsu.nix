@@ -1,27 +1,33 @@
 {
-  flake.modules.homeManager.terminal = {
-    programs.jujutsu = {
-      enable = true;
-      settings = {
-        user = {
-          email = "will@thehutchery.com";
-          name = "Hutch";
-        };
-        signing = {
-          behavior = "own";
-          sign-all = true;
-          backend = "ssh";
-          key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIENMDh7q29md/cAQWBp13Fk//buN4KiQIiwJze+rRj9P";
-        };
-        remotes = {
-          origin = {
-            auto-track-bookmarks = "glob:hutch/* | glob:whutchinson98/*";
+  flake.modules.homeManager.terminal =
+    { config, lib, ... }:
+    {
+      options.dotfiles.jujutsu.sshSigning.enable = lib.mkEnableOption "SSH commit signing for Jujutsu";
+
+      config.programs.jujutsu = {
+        enable = true;
+        settings = {
+          user = {
+            email = "will@thehutchery.com";
+            name = "Hutch";
           };
-          upstream = {
-            auto-track-bookmarks = "main";
+          remotes = {
+            origin = {
+              auto-track-bookmarks = "glob:hutch/* | glob:whutchinson98/*";
+            };
+            upstream = {
+              auto-track-bookmarks = "main";
+            };
+          };
+        }
+        // lib.optionalAttrs config.dotfiles.jujutsu.sshSigning.enable {
+          signing = {
+            behavior = "own";
+            sign-all = true;
+            backend = "ssh";
+            key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIENMDh7q29md/cAQWBp13Fk//buN4KiQIiwJze+rRj9P";
           };
         };
       };
     };
-  };
 }

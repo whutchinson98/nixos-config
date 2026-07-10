@@ -27,7 +27,10 @@
 
           services.fwupd.enable = true;
 
-          home-manager.users.hutch.dotfiles.aws.credentialProvider = "onepassword";
+          home-manager.users.hutch.dotfiles = {
+            aws.credentialProvider = "onepassword";
+            jujutsu.sshSigning.enable = true;
+          };
         }
       ];
   };
