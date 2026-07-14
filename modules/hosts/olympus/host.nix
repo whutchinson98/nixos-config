@@ -24,10 +24,15 @@
           nixpkgs.hostPlatform = "x86_64-linux";
 
           dotfiles.tailscale.sshMode = true;
+          networking.firewall.interfaces."tailscale0".allowedTCPPorts = [ 50051 ];
+
           home-manager.users.hutch.dotfiles = {
             aws.credentialProvider = "onepassword";
             jujutsu.sshSigning.enable = true;
-            notificationProxy.startServer = true;
+            notificationProxy = {
+              startServer = true;
+              listenAddress = "[::]:50051";
+            };
           };
 
           # Host-specific home config rides along in the host module

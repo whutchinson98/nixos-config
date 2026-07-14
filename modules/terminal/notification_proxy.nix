@@ -12,7 +12,14 @@
       notificationProxy = inputs.notification-proxy.packages.${pkgs.stdenv.hostPlatform.system}.default;
     in
     {
-      options.dotfiles.notificationProxy.startServer = lib.mkEnableOption "the notification proxy user service";
+      options.dotfiles.notificationProxy = {
+        startServer = lib.mkEnableOption "the notification proxy user service";
+        listenAddress = lib.mkOption {
+          type = lib.types.str;
+          default = "127.0.0.1:50051";
+          description = "Socket address on which the notification proxy service listens";
+        };
+      };
 
       config = {
         home.packages = [ notificationProxy ];
@@ -25,7 +32,7 @@
           };
 
           Service = {
-            ExecStart = "${notificationProxy}/bin/notification-proxy serve";
+            ExecStart = "${notificationProxy}/bin/notification-proxy serve --listen ${config.dotfiles.notificationProxy.listenAddress}";
             Restart = "on-failure";
           };
 
