@@ -254,7 +254,10 @@ const PlanBuildParams = Type.Object({
     }),
   ),
   builderAgent: Type.Optional(Type.String({ description: 'Builder agent name. Default: "builder".' })),
-  verifierAgent: Type.Optional(Type.String({ description: 'Verifier agent name to run after plan-build completes. Default: "verifier".' })),
+  verifierAgent: Type.Optional(Type.String({ description: 'Verifier agent name to run when runVerifier is true. Default: "verifier".' })),
+  runVerifier: Type.Optional(
+    Type.Boolean({ description: "Run the verifier agent after the plan build completes. Default: false.", default: false }),
+  ),
   agentScope: Type.Optional(AgentScopeSchema),
   maxConcurrency: Type.Optional(
     Type.Number({
@@ -1823,6 +1826,7 @@ async function buildPlanFile(
     taskIds?: string[];
     builderAgent?: string;
     verifierAgent?: string;
+    runVerifier?: boolean;
     agentScope?: AgentScope;
     maxConcurrency?: number;
     builderMonitor?: boolean;
@@ -1840,6 +1844,7 @@ async function buildPlanFile(
   const relativePath = displayPath(ctx.cwd, absolutePath);
   const builderAgent = params.builderAgent?.trim() || DEFAULT_BUILDER_AGENT;
   const verifierAgent = params.verifierAgent?.trim() || DEFAULT_VERIFIER_AGENT;
+  const runVerifier = params.runVerifier ?? false;
   const model = params.model;
   const effort = params.effort;
   const agentScope = params.agentScope ?? "user";
@@ -1874,8 +1879,15 @@ async function buildPlanFile(
     : "builder monitor disabled";
 
   findAgentOrThrow(agents, builderAgent);
-  findAgentOrThrow(agents, verifierAgent);
-  await confirmProjectAgents(ctx, discovery, agents, agentScope, [builderAgent, verifierAgent], params.confirmProjectAgents ?? true);
+  if (runVerifier) findAgentOrThrow(agents, verifierAgent);
+  await confirmProjectAgents(
+    ctx,
+    discovery,
+    agents,
+    agentScope,
+    runVerifier ? [builderAgent, verifierAgent] : [builderAgent],
+    params.confirmProjectAgents ?? true,
+  );
 
   if (!fs.existsSync(absolutePath)) throw new Error(`Plan file not found: ${relativePath}`);
 
@@ -2090,61 +2102,63 @@ async function buildPlanFile(
     // Ignore cleanup failures; failed/blocked task workspaces may intentionally remain.
   }
 
-  agentViews.set("VERIFIER", {
-    id: "VERIFIER",
-    title: "Review integrated changes and write findings report",
-    agent: verifierAgent,
-    model,
-    status: "starting",
-    output: "",
-    progress: "Starting verifier agent...",
-  });
-  onUpdate?.({
-    content: [{ type: "text", text: `Running ${verifierAgent} on ${model} (${effort} effort) to verify completed plan build...` }],
-    details: detailsFor(),
-  });
+  if (runVerifier) {
+    agentViews.set("VERIFIER", {
+      id: "VERIFIER",
+      title: "Review integrated changes and write findings report",
+      agent: verifierAgent,
+      model,
+      status: "starting",
+      output: "",
+      progress: "Starting verifier agent...",
+    });
+    onUpdate?.({
+      content: [{ type: "text", text: `Running ${verifierAgent} on ${model} (${effort} effort) to verify completed plan build...` }],
+      details: detailsFor(),
+    });
 
-  verifierRun = await runAgent(
-    ctx.cwd,
-    agents,
-    verifierAgent,
-    createVerifierTask(relativePath, results),
-    { model, effort },
-    signal,
-    (agentResult) => {
-      const status = agentResult.progressMessage
-        ? `Verifier: ${agentResult.progressMessage}`
-        : `${verifierAgent} is writing .pi/outputs/findings.html...`;
+    verifierRun = await runAgent(
+      ctx.cwd,
+      agents,
+      verifierAgent,
+      createVerifierTask(relativePath, results),
+      { model, effort },
+      signal,
+      (agentResult) => {
+        const status = agentResult.progressMessage
+          ? `Verifier: ${agentResult.progressMessage}`
+          : `${verifierAgent} is writing .pi/outputs/findings.html...`;
 
-      updateAgentView("VERIFIER", {
-        status: "running",
-        output: agentOutput(agentResult),
-        progress: agentResult.progressMessage ?? status,
-      });
-      onUpdate?.({
-        content: [{ type: "text", text: status }],
-        details: detailsFor(agentResult),
-      });
-    },
-  );
-  updateAgentView("VERIFIER", {
-    status: isAgentErrored(verifierRun) ? "failed" : "done",
-    output: agentOutput(verifierRun),
-    progress: isAgentErrored(verifierRun)
-      ? "Verifier failed; inspect its output for details."
-      : "Verifier finished; report written to .pi/outputs/findings.html.",
-    exitCode: verifierRun.exitCode,
-  });
-  onUpdate?.({
-    content: [{ type: "text", text: `Verifier ${isAgentErrored(verifierRun) ? "failed" : "finished"}.` }],
-    details: detailsFor(),
-  });
+        updateAgentView("VERIFIER", {
+          status: "running",
+          output: agentOutput(agentResult),
+          progress: agentResult.progressMessage ?? status,
+        });
+        onUpdate?.({
+          content: [{ type: "text", text: status }],
+          details: detailsFor(agentResult),
+        });
+      },
+    );
+    updateAgentView("VERIFIER", {
+      status: isAgentErrored(verifierRun) ? "failed" : "done",
+      output: agentOutput(verifierRun),
+      progress: isAgentErrored(verifierRun)
+        ? "Verifier failed; inspect its output for details."
+        : "Verifier finished; report written to .pi/outputs/findings.html.",
+      exitCode: verifierRun.exitCode,
+    });
+    onUpdate?.({
+      content: [{ type: "text", text: `Verifier ${isAgentErrored(verifierRun) ? "failed" : "finished"}.` }],
+      details: detailsFor(),
+    });
 
-  notifyPlannerBuilder(
-    isAgentErrored(verifierRun)
-      ? `Plan verifier failed for ${relativePath}.`
-      : `Plan verifier finished for ${relativePath}: .pi/outputs/findings.html`,
-  );
+    notifyPlannerBuilder(
+      isAgentErrored(verifierRun)
+        ? `Plan verifier failed for ${relativePath}.`
+        : `Plan verifier finished for ${relativePath}: .pi/outputs/findings.html`,
+    );
+  }
 
   if (targetIds.size > 0) {
     const content = await fs.promises.readFile(absolutePath, "utf8");
@@ -2159,7 +2173,7 @@ async function buildPlanFile(
   const blockedCount = results.filter((result) => result.status === "blocked").length;
   const summaryLines = results.map((result) => `- ${result.task.id} ${result.status}: ${result.task.title}`);
   const skippedLines = skipped.map((item) => `- ${item.id}: ${item.reason}`);
-  let verifierText = "Verifier did not run.";
+  let verifierText = runVerifier ? "Verifier did not run." : "Verifier skipped (not requested).";
   if (verifierRun && isAgentErrored(verifierRun)) {
     verifierText = "Verifier failed. Expected report path: .pi/outputs/findings.html";
   } else if (verifierRun) {
@@ -2175,8 +2189,9 @@ async function buildPlanFile(
     .filter(Boolean)
     .join("\n");
 
+  const verifierStatus = !runVerifier ? "skipped" : verifierRun && !isAgentErrored(verifierRun) ? "done" : "failed";
   notifyPlannerBuilder(
-    `Plan build finished for ${relativePath}: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped; verifier ${verifierRun && !isAgentErrored(verifierRun) ? "done" : "failed"}.`,
+    `Plan build finished for ${relativePath}: ${doneCount} done, ${failedCount} failed, ${blockedCount} blocked, ${skipped.length} skipped; verifier ${verifierStatus}.`,
   );
   return { text, details: detailsFor() };
 }
@@ -2476,12 +2491,14 @@ export default function (pi: ExtensionAPI) {
     name: "plan_file_build",
     label: "Build Plan File",
     description:
-      "Run builder agents with the model and effort selected in the main pi process for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces under a builder watchdog that cancels/restarts stuck attempts, are integrated serially onto the main workspace, and then the verifier agent writes .pi/outputs/findings.html.",
-    promptSnippet: "Run builder agents with the current model and effort and watchdog monitoring against pending tasks, then run verifier to write .pi/outputs/findings.html.",
+      "Run builder agents with the model and effort selected in the main pi process for ready tasks in a planner-created plan file. Independent tasks run in parallel Jujutsu workspaces under a builder watchdog that cancels/restarts stuck attempts and are integrated serially onto the main workspace. Set runVerifier to true to run the verifier agent afterward and write .pi/outputs/findings.html.",
+    promptSnippet: "Run builder agents with the current model and effort and watchdog monitoring against pending tasks; optionally run verifier afterward.",
     promptGuidelines: [
       "Use plan_file_build when the user asks builder agents to implement tasks from a plan file.",
       "Use plan_file_build only after a plan file exists, usually from plan_file_create.",
-      "plan_file_build runs independent tasks in separate Jujutsu workspaces, watches builder status output, cancels/restarts stuck builder attempts, requires one atomic Jujutsu (jj) commit per task, integrates completed commits serially, and runs verifier at the end.",
+      "plan_file_build runs independent tasks in separate Jujutsu workspaces, watches builder status output, cancels/restarts stuck builder attempts, requires one atomic Jujutsu (jj) commit per task, and integrates completed commits serially.",
+      "Set plan_file_build runVerifier to true only when the user explicitly asks for verifier-agent review; verification is skipped by default.",
+      "To trigger verifier review after a completed build, call plan_file_build again for the same plan with runVerifier true; completed tasks are skipped.",
     ],
     parameters: PlanBuildParams,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -2508,8 +2525,9 @@ export default function (pi: ExtensionAPI) {
     renderCall(args, theme) {
       const path = args.path?.trim() || "...";
       const taskCount = args.taskIds?.length ? ` · ${args.taskIds.length} selected task${args.taskIds.length === 1 ? "" : "s"}` : "";
+      const verification = args.runVerifier ? " · verifier" : "";
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("plan_file_build"))} ${theme.fg("accent", path)}${theme.fg("muted", taskCount)}`,
+        `${theme.fg("toolTitle", theme.bold("plan_file_build"))} ${theme.fg("accent", path)}${theme.fg("muted", `${taskCount}${verification}`)}`,
         0,
         0,
       );
@@ -2602,11 +2620,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("plan-build", {
-    description: "Run builder agents with the current model and effort in monitored parallel Jujutsu workspaces, integrate commits, then run verifier. Usage: /plan-build [plan-file] [T01,T02]",
+    description: "Run builder agents with the current model and effort in monitored parallel Jujutsu workspaces and integrate commits. Add --verify to run verifier afterward. Usage: /plan-build [--verify] [plan-file] [T01,T02]",
     handler: async (args, ctx) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
-      let planPath = tokens.shift();
-      let taskIds = parseTaskIds(tokens.join(","));
+      const runVerifier = tokens.includes("--verify");
+      const positionalTokens = tokens.filter((token) => token !== "--verify");
+      let planPath = positionalTokens.shift();
+      let taskIds = parseTaskIds(positionalTokens.join(","));
 
       if (planPath && /^T\d+/i.test(planPath)) {
         taskIds = [planPath, ...taskIds];
@@ -2616,7 +2636,7 @@ export default function (pi: ExtensionAPI) {
       if (!planPath) planPath = await latestPlanFile(ctx.cwd);
 
       if (!planPath) {
-        ctx.ui.notify(`Usage: /plan-build <plan-file> [T01,T02]. No files found in ${DEFAULT_PLAN_DIR}.`, "warning");
+        ctx.ui.notify(`Usage: /plan-build [--verify] <plan-file> [T01,T02]. No files found in ${DEFAULT_PLAN_DIR}.`, "warning");
         return;
       }
 
@@ -2641,7 +2661,7 @@ export default function (pi: ExtensionAPI) {
           progress.update("building...");
           const result = await buildPlanFile(
             ctx,
-            { path: resolvedPlanPath, taskIds, model: getSelectedModel(ctx), effort: getSelectedEffort() },
+            { path: resolvedPlanPath, taskIds, runVerifier, model: getSelectedModel(ctx), effort: getSelectedEffort() },
             undefined,
             (partial) => {
               dashboard?.update(partial.details);
@@ -2692,7 +2712,7 @@ export default function (pi: ExtensionAPI) {
     if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- plan_file_create can pause to surface material planner questions through the parent pi UI and resume with the user's answers.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task, integrates completed commits serially onto the main workspace, and then runs verifier to write .pi/outputs/findings.html.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- plan_file_create can pause to surface material planner questions through the parent pi UI and resume with the user's answers.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build runs independent tasks in parallel Jujutsu workspaces under a builder watchdog that periodically checks status output and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task and integrates completed commits serially onto the main workspace.\n- Verifier-agent review is optional and skipped by default; set plan_file_build runVerifier to true only when the user explicitly asks for it. Calling it again for a completed plan skips done tasks and runs the requested review.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
     };
   });
 }
