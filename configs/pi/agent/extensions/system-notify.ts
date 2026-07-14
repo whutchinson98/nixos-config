@@ -34,6 +34,17 @@ function notificationMessage(message = DEFAULT_MESSAGE): string {
 export function notify(message = DEFAULT_MESSAGE, title = TITLE): void {
 	const resolvedMessage = notificationMessage(message);
 
+	if (process.env.IS_PI_REMOTE) {
+		run("notification-proxy", [
+			"send",
+			"--endpoint",
+			"http://olympus:50051",
+			"--summary",
+			resolvedMessage,
+		]);
+		return;
+	}
+
 	switch (process.platform) {
 		case "darwin":
 			run("osascript", [

@@ -26,6 +26,8 @@
             dotfiles.aws.credentialProvider = "default-chain";
             dotfiles.tmux.prefix = "C-b";
 
+            home.sessionVariables.IS_PI_REMOTE = "1";
+
             programs.ssh = {
               enable = true;
             };
