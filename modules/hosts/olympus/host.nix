@@ -27,6 +27,7 @@
           home-manager.users.hutch.dotfiles = {
             aws.credentialProvider = "onepassword";
             jujutsu.sshSigning.enable = true;
+            notificationProxy.startServer = true;
           };
 
           # Host-specific home config rides along in the host module

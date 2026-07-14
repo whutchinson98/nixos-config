@@ -30,6 +30,7 @@
           home-manager.users.hutch.dotfiles = {
             aws.credentialProvider = "onepassword";
             jujutsu.sshSigning.enable = true;
+            notificationProxy.startServer = true;
           };
         }
       ];
