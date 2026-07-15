@@ -14,7 +14,6 @@
       opAwsWorkCreds = pkgs.writeShellApplication {
         name = "op-aws-work-creds";
         runtimeInputs = [
-          pkgs._1password-cli
           pkgs.jq
         ];
 
@@ -33,7 +32,6 @@
       opAwsCreds = pkgs.writeShellApplication {
         name = "op-aws-creds";
         runtimeInputs = [
-          pkgs._1password-cli
           pkgs.jq
         ];
 
