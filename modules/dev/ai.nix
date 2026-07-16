@@ -31,6 +31,7 @@
           # pi-coding-agent
           inputs.pi-mono-nix.packages.${pkgs.stdenv.hostPlatform.system}.default
           inputs.claude-code-nix.packages.${pkgs.stdenv.hostPlatform.system}.default
+          inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default
         ])
         ++ [ mcpRemote ];
 
