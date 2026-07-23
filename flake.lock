@@ -496,11 +496,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784810888,
-        "narHash": "sha256-uQ3h/IbLpMmLNSK1MbMaDbvj6pUSjOJKaz1+4NVX1Kk=",
+        "lastModified": 1784812730,
+        "narHash": "sha256-Z3Ri75NusNKsJgVodlFaYLA0yhCIUgIvnE7jlqgMuWQ=",
         "owner": "whutchinson98",
         "repo": "pi-mono.nix",
-        "rev": "bc60d3841c3b23a31efe5fd8d4188794a47c3d5d",
+        "rev": "df8d9c537babfe90577d1936132c8f458564b288",
         "type": "github"
       },
       "original": {
