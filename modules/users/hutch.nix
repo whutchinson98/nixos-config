@@ -36,7 +36,7 @@
     home.stateVersion = "25.05";
     home.file = { };
     home.sessionVariables = {
-      EDITOR = "hx";
+      EDITOR = "nvim";
     };
     programs.home-manager.enable = true;
   };
