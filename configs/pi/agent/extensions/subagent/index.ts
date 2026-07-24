@@ -555,6 +555,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Delegate work to specialized pi agents from ~/.pi/agent/agents using isolated pi subprocesses.",
     promptGuidelines: [
       "Use subagent when the user asks you to use, spawn, delegate to, or consult a named agent.",
+      'Treat a request that starts with an available agent name, such as "investigate ...", as a request to delegate to that agent.',
       "Use agent_list before subagent if you do not know which agents are available.",
       "Use subagent with agentScope user by default; only use project or both for trusted project-local agents.",
       "Do not call subagent in the same parallel tool batch as edit, write, or bash file mutations; wait for the subagent result before making additional local changes.",
@@ -802,7 +803,7 @@ export default function (pi: ExtensionAPI) {
     if (agents.length === 0) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nSubagent guidance:\n- Use agent_list when the user asks what agents are available.\n- Use subagent when the user asks you to use, spawn, consult, or delegate to one of these agents.\n- Available user agents:\n${formatAgentList(agents, 10)}`,
+      systemPrompt: `${event.systemPrompt}\n\nSubagent guidance:\n- Use agent_list when the user asks what agents are available.\n- Use subagent when the user asks you to use, spawn, consult, or delegate to one of these agents.\n- Treat a request that starts with an available agent name, such as \"investigate ...\", as a request to delegate to that agent.\n- Available user agents:\n${formatAgentList(agents, 10)}`,
     };
   });
 }

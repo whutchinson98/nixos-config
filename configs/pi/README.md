@@ -15,6 +15,8 @@ Add extensions as either:
 
 The `agent/extensions/subagent` extension registers `agent_list` and `subagent` tools so pi can list and spawn the agents in `agent/agents/`. Agents that opt into the `ask_user` tool can pause, send a system notification, and surface material questions through the parent pi UI before continuing.
 
+The read-only `investigate` agent answers codebase questions with repository evidence and actionable next steps. Invoke it with `/investigate <question>` or by starting a request with `investigate`.
+
 The `agent/extensions/planner-builder` extension registers `plan_file_create`, `plan_file_build`, and `plan_file_list` tools plus `/plan-create`, `/plan-build`, and `/plan-list` commands. It uses the model and effort selected in the main pi process when running the `planner`, `builder`, and optional `verifier` agents. During plan creation, the planner can pause to ask the user material scope or architecture questions through the parent pi UI, then continue with the answer. The planner writes `.pi/plans/*.md` plan files, then builders implement ready independent task blocks in monitored parallel Jujutsu workspaces. A live dashboard shows every launched agent with per-agent collapse controls while the extension cancels/restarts stuck attempts and serially integrates each atomic task commit onto the main workspace. Verifier review is skipped by default; set `runVerifier: true` on `plan_file_build` or pass `--verify` to `/plan-build` to write `.pi/outputs/findings.html`.
 
 After rebuilding home-manager/NixOS, run `/reload` inside pi to pick up changes.
