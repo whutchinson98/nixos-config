@@ -28,12 +28,22 @@
       home.packages =
         (with pkgs; [
           fd
+          ripgrep
           # pi-coding-agent
           inputs.pi-mono-nix.packages.${pkgs.stdenv.hostPlatform.system}.default
           inputs.claude-code-nix.packages.${pkgs.stdenv.hostPlatform.system}.default
           inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default
         ])
         ++ [ mcpRemote ];
+
+      # package metadata / docs
+      home.file.".pi/agent/package.json" = {
+        source = piAgentPath + /package.json;
+      };
+
+      home.file.".pi/agent/README.md" = {
+        source = piAgentPath + /README.md;
+      };
 
       # append system
       home.file.".pi/agent/APPEND_SYSTEM.md" = {
@@ -45,7 +55,7 @@
         source = piAgentPath + /keybindings.json;
       };
 
-      # skils
+      # skills
       home.file.".pi/agent/skills" = {
         source = piAgentPath + /skills;
         recursive = true;
@@ -66,6 +76,12 @@
       # prompts
       home.file.".pi/agent/prompts" = {
         source = piAgentPath + "/prompts";
+        recursive = true;
+      };
+
+      # themes
+      home.file.".pi/agent/themes" = {
+        source = piAgentPath + "/themes";
         recursive = true;
       };
     };

@@ -2,7 +2,7 @@
 
 Store pi extension source files here.
 
-Pi will load these from `~/.pi/agent/extensions` once linked by home-manager.
+Pi will load these from `~/.pi/agent/extensions` once linked by Home Manager.
 
 Examples:
 
@@ -15,6 +15,22 @@ extensions/
 ```
 
 Extension files should default-export a function that receives `ExtensionAPI`.
+
+## Dashboard UI
+
+`dashboard/` is the local adaptation of the UI ideas from `davis7dotsh/my-pi-setup`:
+
+- gradient pi header
+- two-line footer with cwd, model/effort, context usage, cost, tokens/sec, and Jujutsu status
+- themed working spinner
+- `/dashboard [on|off|refresh]`
+- `/github-theme` to switch to the bundled `github-dark-default` theme
+
+The VCS status is intentionally Jujutsu-based and does not call `git`.
+
+## File search
+
+`file-search/` registers first-class `fd` and `rg` tools. Unlike the upstream example, it does not download fallback binaries at startup; `fd` and `ripgrep` are installed by Nix in `modules/dev/ai.nix`. It probes all PATH candidates and uses the first executable that actually runs, so stale downloaded binaries under `~/.pi/agent/bin` do not shadow the Nix binaries.
 
 ## Workspace initialization
 
@@ -65,7 +81,7 @@ npx -y mcp-remote https://mcp.linear.app/mcp
 npx -y mcp-remote https://mcp.ai.pulumi.com/mcp
 ```
 
-`modules/home/dev/ai.nix` installs `mcp-remote` as a Nix/Home Manager command wrapper for Linux/NixOS. The wrapper runs `npx -y mcp-remote` with Nix's `nodejs` in PATH.
+`modules/dev/ai.nix` installs `mcp-remote` as a Nix/Home Manager command wrapper for Linux/NixOS. The wrapper runs `npx -y mcp-remote` with Nix's `nodejs` in PATH.
 
 Registered loader tools, tool prefixes, and commands:
 
