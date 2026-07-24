@@ -26,13 +26,16 @@ The planner is instructed to inspect the repository first and not ask questions 
 
 ## Live agent dashboard
 
-`/plan-build` and the `plan_file_build` tool show a dashboard above the editor while builders and any requested verifier run. Every agent title includes the model being used, starts expanded, and displays its latest output. The dashboard remains available after the build so results can be inspected.
+`/plan-build` and the `plan_file_build` tool open an interactive subagent navigator while builders and any requested verifier run. Its main view is a compact list with one row per launched agent, including task id, title, status, agent, and model. The selected agent's detail view shows its current activity and streaming output. The navigator remains available after the build so results can be inspected.
 
-| Shortcut | Action |
+| Key | Action |
 | --- | --- |
-| `Alt+K` / `Alt+J` | Select the previous or next agent. |
-| `Alt+O` | Collapse or expand only the selected agent's output. |
-| `Alt+X` | Hide or restore the dashboard. |
+| `j` / `k` or `Down` / `Up` | Select the next or previous agent in the main list; scroll output in an agent detail view. |
+| `Enter`, `l`, or `Right` | Open the selected agent's detail view. |
+| `h`, `Left`, or `Esc` | Return from an agent detail view to the main list. `Esc` closes the main list. |
+| `g` / `G` | Jump to the top or bottom of an agent's output. |
+| `q` | Close the navigator from either view. |
+| `Alt+X` | Hide or restore the navigator. |
 
 The normal tool result also renders an all-agent summary in the transcript and continues to support Pi's global `Ctrl+O` tool expansion.
 

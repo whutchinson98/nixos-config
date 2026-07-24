@@ -60,7 +60,7 @@ It also registers `/agents [user|project|both]` for interactive discovery.
 | Tool | Purpose |
 | --- | --- |
 | `plan_file_create` | Run the `planner` agent with the model and effort selected in the main pi process, surface material planner questions through the parent UI, and save a structured plan file under `.pi/plans`. |
-| `plan_file_build` | Run `builder` agents with the model and effort selected in the main pi process for ready independent tasks in parallel Jujutsu workspaces, show all live agent outputs in a collapsible dashboard, and serially integrate each atomic `jj` commit. Verifier review is skipped by default; set `runVerifier: true` to run `verifier` with the same selection and write `.pi/outputs/findings.html`. |
+| `plan_file_build` | Run `builder` agents with the model and effort selected in the main pi process for ready independent tasks in parallel Jujutsu workspaces, show a Vim-navigable subagent list with per-agent live output views, and serially integrate each atomic `jj` commit. Verifier review is skipped by default; set `runVerifier: true` to run `verifier` with the same selection and write `.pi/outputs/findings.html`. |
 | `plan_file_list` | List recent plan files. |
 
 It also registers `/plan-create`, `/plan-build`, and `/plan-list`. Pass `--verify` to `/plan-build` to opt into verifier review.

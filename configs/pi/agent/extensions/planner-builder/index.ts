@@ -2373,14 +2373,12 @@ function startCommandProgress(ctx: ExtensionContext, key: string, initialText: s
 export default function (pi: ExtensionAPI) {
   let selectedEffort: SelectedEffort | undefined;
   let activeBuildDashboard: PlanBuildDashboard | undefined;
-  let dashboardVisible = false;
 
   const getSelectedEffort = (): SelectedEffort => selectedEffort ?? normalizeThinkingLevel(pi.getThinkingLevel());
   const startBuildDashboard = (ctx: ExtensionContext, planPath: string): PlanBuildDashboard => {
-    activeBuildDashboard?.detach();
+    activeBuildDashboard?.close();
     const dashboard = new PlanBuildDashboard(planPath);
     activeBuildDashboard = dashboard;
-    dashboardVisible = ctx.mode === "tui";
     showPlanBuildDashboard(ctx, dashboard);
     return dashboard;
   };
@@ -2412,34 +2410,6 @@ export default function (pi: ExtensionAPI) {
     return new Text(text, 1, 0);
   });
 
-  pi.registerShortcut("alt+k", {
-    description: "Select previous planner-builder agent",
-    handler: async (ctx) => {
-      const selected = activeBuildDashboard?.select(-1);
-      if (!selected) ctx.ui.notify("No planner-builder agents to select.", "info");
-    },
-  });
-
-  pi.registerShortcut("alt+j", {
-    description: "Select next planner-builder agent",
-    handler: async (ctx) => {
-      const selected = activeBuildDashboard?.select(1);
-      if (!selected) ctx.ui.notify("No planner-builder agents to select.", "info");
-    },
-  });
-
-  pi.registerShortcut("alt+o", {
-    description: "Collapse or expand selected planner-builder agent output",
-    handler: async (ctx) => {
-      const toggled = activeBuildDashboard?.toggleSelected();
-      if (!toggled) {
-        ctx.ui.notify("No planner-builder agent output to collapse.", "info");
-        return;
-      }
-      ctx.ui.notify(`${toggled.id} output ${toggled.collapsed ? "collapsed" : "expanded"}.`, "info");
-    },
-  });
-
   pi.registerShortcut("alt+x", {
     description: "Show or hide the planner-builder dashboard",
     handler: async (ctx) => {
@@ -2448,16 +2418,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (dashboardVisible) hidePlanBuildDashboard(ctx, activeBuildDashboard);
+      if (activeBuildDashboard.isVisible()) hidePlanBuildDashboard(ctx, activeBuildDashboard);
       else showPlanBuildDashboard(ctx, activeBuildDashboard);
-      dashboardVisible = !dashboardVisible;
     },
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     if (activeBuildDashboard) hidePlanBuildDashboard(ctx, activeBuildDashboard);
     activeBuildDashboard = undefined;
-    dashboardVisible = false;
   });
 
   pi.registerTool({
