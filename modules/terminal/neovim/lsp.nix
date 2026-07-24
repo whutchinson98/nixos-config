@@ -2,6 +2,20 @@
   flake.modules.homeManager.terminal =
     { lib, ... }:
     {
+      # User-level rust-analyzer config; also silences the startup watcher
+      # warning ("notify error: No path was found") when this path is missing.
+      xdg.configFile."rust-analyzer/rust-analyzer.toml".text = ''
+        # Clippy lints instead of plain cargo check
+        check.command = "clippy"
+
+        # Build into target/rust-analyzer/ so background checks don't
+        # take the cargo lock and block terminal cargo commands
+        cargo.targetDir = true
+
+        # Don't crawl direnv's nix-store symlink tree
+        files.excludeDirs = [".direnv"]
+      '';
+
       programs.neovim.initLua = lib.mkOrder 1200 ''
         local function reload_workspace(bufnr)
           local clients = vim.lsp.get_clients({ bufnr = bufnr, name = "rust_analyzer" })
