@@ -1,0 +1,10 @@
+keys:
+  - &hutch age1xktzf37vtkpcs8zzlpx4qluw5p5d4dyw5jh4zq53vhhjn9p3re8sekav9j
+  - &media age1tl0h0lvfercw9erjq8wgeyndtp95wdg34qw6nmdu8dws2nqg7u3sytmln9
+
+creation_rules:
+  - path_regex: secrets/.*\.yaml$
+    key_groups:
+      - age:
+          - *hutch
+          - *media

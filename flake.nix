@@ -44,6 +44,17 @@
     };
 
     nixos-hardware.url = "github:NixOS/nixos-hardware";
+
+    sops-nix = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    nixarr = {
+      # Pinned: newer revs break eval when transmission.vpn is enabled with
+      # the default peerPort = null (null openVPNPorts entry)
+      url = "github:nix-media-server/nixarr/7cc521933dc6800ae81ecfc91fe36237476e4ffb";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =

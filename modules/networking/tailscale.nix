@@ -13,6 +13,12 @@
         description = "Enable Tailscale SSH with --operator=hutch";
       };
 
+      options.dotfiles.tailscale.trusted = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Trust the tailscale0 interface in the firewall (server hosts)";
+      };
+
       config.services.tailscale = {
         enable = true;
         useRoutingFeatures = if cfg.sshMode then "both" else "client";
@@ -20,6 +26,11 @@
           "--ssh"
           "--operator=hutch"
         ];
+      };
+
+      config.networking.firewall = lib.mkIf cfg.trusted {
+        trustedInterfaces = [ "tailscale0" ];
+        allowedUDPPorts = [ 41641 ]; # Tailscale WireGuard port
       };
     };
 }
