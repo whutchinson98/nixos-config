@@ -1,0 +1,181 @@
+{ inputs, ... }:
+{
+  flake.modules.homeManager.desktop =
+    {
+      config,
+      lib,
+      pkgs,
+      ...
+    }:
+    {
+      # import the home manager module
+      imports = [
+        inputs.noctalia.homeModules.default
+      ];
+
+      xdg.configFile."noctalia/plugins/proton-vpn" = {
+        source = ../../configs/noctalia/plugins/proton-vpn;
+        recursive = true;
+        force = true;
+      };
+
+      home.activation.enableNoctaliaProtonVpnPlugin = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        plugins_file="${config.xdg.configHome}/noctalia/plugins.json"
+        mkdir -p "$(${pkgs.coreutils}/bin/dirname "$plugins_file")"
+
+        if [ -e "$plugins_file" ] && ${pkgs.jq}/bin/jq empty "$plugins_file" >/dev/null 2>&1; then
+          tmp="$(${pkgs.coreutils}/bin/mktemp)"
+          ${pkgs.jq}/bin/jq '
+            .version = 2
+            | .states = (.states // {})
+            | .sources = (if ((.sources // []) | length) == 0 then [{"name":"Noctalia Plugins","url":"https://github.com/noctalia-dev/noctalia-plugins","enabled":true}] else .sources end)
+            | .states["proton-vpn"] = ((.states["proton-vpn"] // {}) + {"enabled":true,"sourceUrl":"local"})
+          ' "$plugins_file" > "$tmp"
+          ${pkgs.coreutils}/bin/cat "$tmp" > "$plugins_file"
+          ${pkgs.coreutils}/bin/rm -f "$tmp"
+        else
+          ${pkgs.coreutils}/bin/printf '%s\n' '{"version":2,"sources":[{"name":"Noctalia Plugins","url":"https://github.com/noctalia-dev/noctalia-plugins","enabled":true}],"states":{"proton-vpn":{"enabled":true,"sourceUrl":"local"}}}' > "$plugins_file"
+        fi
+      '';
+
+      # configure options
+      programs.noctalia-shell = {
+        enable = true;
+        settings = {
+          wallpaper = {
+            enabled = true;
+            directory = "${config.home.homeDirectory}/backgrounds";
+            default.path = "${config.home.homeDirectory}/backgrounds/nord.png";
+            last.path = "${config.home.homeDirectory}/backgrounds/nord.png";
+            monitors = {
+              DP-1.path = "${config.home.homeDirectory}/backgrounds/nord.png";
+            };
+          };
+          appLauncher = {
+            enableClipboardHistory = false;
+            autoPasteClipboard = false;
+            enableClipPreview = true;
+            clipboardWrapText = true;
+            enableClipboardSmartIcons = true;
+            enableClipboardChips = true;
+            clipboardWatchTextCommand = "wl-paste --type text --watch cliphist store";
+            clipboardWatchImageCommand = "wl-paste --type image --watch cliphist store";
+            position = "center";
+            pinnedApps = [ ];
+            sortByMostUsed = true;
+            terminalCommand = "alacritty -e";
+            customLaunchPrefixEnabled = false;
+            customLaunchPrefix = "";
+            viewMode = "list";
+            showCategories = true;
+            iconMode = "tabler";
+            showIconBackground = false;
+            enableSettingsSearch = true;
+            enableWindowsSearch = true;
+            enableSessionSearch = true;
+            ignoreMouseInput = false;
+            screenshotAnnotationTool = "";
+            overviewLayer = false;
+            density = "default";
+          };
+          shell = {
+            font_family = "GeistMono Nerd Font";
+            launch_apps_as_systemd_services = true;
+            niri_overview_type_to_launch_enabled = true;
+            polkit_agent = true;
+            panel = {
+              clipboard_placement = "attached";
+              transparency_mode = "glass";
+            };
+          };
+          notifications = {
+            enabled = true;
+            enableMarkdown = false;
+            density = "default";
+            monitors = [ ];
+            location = "top_right";
+            overlayLayer = true;
+            backgroundOpacity = 1;
+            respectExpireTimeout = false;
+            lowUrgencyDuration = 3;
+            normalUrgencyDuration = 8;
+            criticalUrgencyDuration = 15;
+            clearDismissed = true;
+            saveToHistory = {
+              low = true;
+              normal = true;
+              critical = true;
+            };
+            sounds = {
+              enabled = false;
+              volume = 0.5;
+              separateSounds = false;
+              criticalSoundFile = "";
+              normalSoundFile = "";
+              lowSoundFile = "";
+              excludedApps = "discord,firefox,chrome,chromium,edge";
+            };
+            enableMediaToast = false;
+            enableKeyboardLayoutToast = true;
+            enableBatteryToast = true;
+          };
+
+          # configure noctalia here
+          bar = {
+            density = "compact";
+            position = "top";
+            showCapsule = false;
+
+            widgets = {
+              left = [
+                {
+                  id = "ControlCenter";
+                  useDistroLogo = true;
+                }
+                {
+                  id = "Network";
+                }
+                {
+                  id = "plugin:proton-vpn";
+                  displayMode = "alwaysShow";
+                  connectedColor = "primary";
+                  disconnectedColor = "none";
+                  iconColor = "none";
+                  textColor = "none";
+                }
+              ];
+              center = [
+                {
+                  hideUnoccupied = false;
+                  id = "Workspace";
+                  labelMode = "none";
+                }
+              ];
+              right = [
+                {
+                  alwaysShowPercentage = false;
+                  id = "Battery";
+                  warningThreshold = 30;
+                }
+                {
+                  formatHorizontal = "yyyy-MM-dd HH:mm";
+                  formatVertical = "HH mm";
+                  id = "Clock";
+                  useMonospacedFont = true;
+                  usePrimaryColor = true;
+                }
+                {
+                  id = "Notifications";
+                }
+              ];
+            };
+          };
+          colorSchemes.predefinedScheme = "Nord";
+          location = {
+            monthBeforeDay = true;
+            name = "Ontario, Canada";
+          };
+        };
+      };
+    };
+}

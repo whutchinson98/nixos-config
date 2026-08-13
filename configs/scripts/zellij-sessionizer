@@ -1,0 +1,27 @@
+#!/bin/sh
+
+if [ $# -eq 1 ]; then
+    selected=$1
+else
+    selected=$(find ~/d -mindepth 0 -maxdepth 1 -type d | fzf)
+fi
+
+if [ -z "$selected" ]; then
+    exit 0
+fi
+
+selected_name=$(basename "$selected" | tr . _)
+
+# Not inside zellij
+if [ -z "$ZELLIJ" ]; then
+    cd "$selected" && zellij attach --create "$selected_name"
+fi
+
+# Inside zellij, session exists — switch to it
+if zellij list-sessions | grep -q "^$selected_name"; then
+    zellij action switch-session "$selected_name"
+    exit 0
+fi
+
+# Inside zellij, session doesn't exist — create and switch to it
+cd "$selected" && zellij action new-session --name "$selected_name" --cwd "$selected"
