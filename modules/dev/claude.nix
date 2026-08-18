@@ -11,14 +11,14 @@
       entries = builtins.attrNames (builtins.readDir ../../configs/claude);
     in
     {
-      home.file = lib.listToAttrs (
-        map (name: {
-          name = ".claude/${name}";
-          value = {
-            source = config.lib.file.mkOutOfStoreSymlink "${claudeConfigPath}/${name}";
-            force = true;
-          };
-        }) entries
-      );
+      # home.file = lib.listToAttrs (
+      #   map (name: {
+      #     name = ".claude/${name}";
+      #     value = {
+      #       source = config.lib.file.mkOutOfStoreSymlink "${claudeConfigPath}/${name}";
+      #       force = true;
+      #     };
+      #   }) entries
+      # );
     };
 }

@@ -15,7 +15,7 @@ Creates planner-generated plan files and dispatches each builder as a native int
 | Tool | Purpose |
 | --- | --- |
 | `plan_file_create` | LLM-callable tool that runs a planner agent with the model and effort selected in the main pi process, surfaces material planner questions through the parent pi UI, and saves a structured plan file. |
-| `plan_file_build` | LLM-callable tool that uses `nathanflurry.jj-workspace` to create Herdr-managed task workspaces, starts a native interactive Pi builder pane for each ready task, mirrors pane output into the dashboard, cancels/restarts stuck attempts, and serially integrates atomic per-task `jj` commits. Set `runVerifier: true` to run the unchanged structured `verifier` subprocess with the same selection and write `.pi/outputs/findings.html`; the default is `false`. |
+| `plan_file_build` | LLM-callable tool that uses the `whutchinson98.jj-workspace.new-no-bookmark` Herdr plugin command to create task workspaces without Jujutsu bookmarks, starts a native interactive Pi builder pane for each ready task, mirrors pane output into the dashboard, cancels/restarts stuck attempts, and serially integrates atomic per-task `jj` commits. Set `runVerifier: true` to run the unchanged structured `verifier` subprocess with the same selection and write `.pi/outputs/findings.html`; the default is `false`. |
 | `plan_file_list` | Lists recent plan files. |
 
 ## Planner questions
@@ -56,7 +56,7 @@ Running `/plan-build --verify` against an already completed plan skips its done 
 
 ## Herdr workspace integration
 
-Plan builds must run inside a Herdr-managed pane (`HERDR_ENV=1`) with the enabled [`whutchinson98/herdr-plugin-jj-workspace`](https://github.com/whutchinson98/herdr-plugin-jj-workspace) plugin installed. For each ready task, the extension opens the plugin's declared `wizard` pane as a temporary Herdr overlay, supplies the generated task workspace name, and passes the current integrated commit as `JJ_BASE_REV`. The plugin performs `jj workspace add`, creates its matching bookmark, and opens the checkout as a Herdr workspace. The extension never calls `jj workspace add` itself. Task workspace names combine the source workspace folder and task ID, so task `T01` launched from `macro-test-thing` is named `macro-test-thing-t01`.
+Plan builds must run inside a Herdr-managed pane (`HERDR_ENV=1`) with the enabled [`whutchinson98/herdr-plugin-jj-workspace`](https://github.com/whutchinson98/herdr-plugin-jj-workspace) plugin installed. For each ready task, the extension explicitly invokes the plugin's `whutchinson98.jj-workspace.new-no-bookmark` command, supplies the generated task workspace name through the command's wizard pane, and rebases the new empty working-copy commit onto the current integrated commit before starting the builder. The plugin performs `jj workspace add` and opens the checkout as a Herdr workspace without creating a Jujutsu bookmark. The extension never calls `jj workspace add` itself. Task workspace names combine the source workspace folder and task ID, so task `T01` launched from `macro-test-thing` is named `macro-test-thing-t01`.
 
 Task checkout paths follow the plugin's `JJ_WORKSPACE_ROOT` setting (environment first, then the plugin config `.env`, then `~/.herdr/workspaces`). Successfully integrated task workspaces are closed in Herdr, forgotten in Jujutsu, and deleted. Failed, blocked, cancelled, stuck-exhausted, validation-failed, or conflicted task workspaces are retained in Herdr and on disk for inspection.
 

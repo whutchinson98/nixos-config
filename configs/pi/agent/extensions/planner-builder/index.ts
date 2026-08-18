@@ -67,7 +67,8 @@ const MAX_BUILDER_MONITOR_INTERVAL_SECONDS = 60 * 60;
 const MAX_BUILDER_STUCK_TIMEOUT_SECONDS = 24 * 60 * 60;
 const MAX_BUILDER_RESTARTS = 5;
 const HERDR_JJ_PLUGIN_ID = "whutchinson98.jj-workspace";
-const HERDR_JJ_PLUGIN_ENTRYPOINT = "wizard";
+const HERDR_JJ_PLUGIN_ACTION_ID = "new-no-bookmark";
+const HERDR_JJ_PLUGIN_COMMAND = `${HERDR_JJ_PLUGIN_ID}.${HERDR_JJ_PLUGIN_ACTION_ID}`;
 const HERDR_PANE_READY_TIMEOUT_MS = 10_000;
 const HERDR_WORKSPACE_CREATE_TIMEOUT_MS = 120_000;
 const HERDR_POLL_INTERVAL_MS = 250;
@@ -1850,11 +1851,9 @@ async function loadHerdrJjWorkspaceConfig(cwd: string): Promise<HerdrJjWorkspace
   }
   if (plugin.enabled !== true) throw new Error(`Herdr plugin ${HERDR_JJ_PLUGIN_ID} is disabled.`);
 
-  const panes = Array.isArray(plugin.panes) ? plugin.panes.filter(isRecord) : [];
-  if (!panes.some((pane) => stringField(pane, "id") === HERDR_JJ_PLUGIN_ENTRYPOINT)) {
-    throw new Error(
-      `Herdr plugin ${HERDR_JJ_PLUGIN_ID} does not expose the required ${HERDR_JJ_PLUGIN_ENTRYPOINT} pane entrypoint.`,
-    );
+  const actions = Array.isArray(plugin.actions) ? plugin.actions.filter(isRecord) : [];
+  if (!actions.some((action) => stringField(action, "id") === HERDR_JJ_PLUGIN_ACTION_ID)) {
+    throw new Error(`Herdr plugin ${HERDR_JJ_PLUGIN_ID} does not expose the required ${HERDR_JJ_PLUGIN_COMMAND} command.`);
   }
 
   const pluginRoot = stringField(plugin, "plugin_root");
@@ -1943,6 +1942,44 @@ async function readHerdrPane(cwd: string, paneId: string): Promise<string> {
   return result.exitCode === 0 ? result.stdout : "";
 }
 
+async function waitForHerdrPluginActionPane(cwd: string, logId: string): Promise<string> {
+  const deadline = Date.now() + HERDR_PANE_READY_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    const list = await runHerdr(cwd, ["plugin", "log", "list", "--plugin", HERDR_JJ_PLUGIN_ID, "--limit", "100"]);
+    const listResponse = parseJsonObject(list.stdout, "herdr plugin log list");
+    const listResult = responseResult(listResponse, "herdr plugin log list");
+    const logs = Array.isArray(listResult.logs) ? listResult.logs.filter(isRecord) : [];
+    const log = logs.find((candidate) => stringField(candidate, "log_id") === logId);
+    if (!log) {
+      await delay(HERDR_POLL_INTERVAL_MS);
+      continue;
+    }
+
+    const status = stringField(log, "status");
+    if (status === "running") {
+      await delay(HERDR_POLL_INTERVAL_MS);
+      continue;
+    }
+
+    const output = stringField(log, "stdout") ?? "";
+    if (status !== "succeeded") {
+      const detail = stringField(log, "error") ?? stringField(log, "stderr") ?? output;
+      throw new Error(`Herdr plugin command ${HERDR_JJ_PLUGIN_COMMAND} failed.\n\n${truncateText(detail)}`);
+    }
+
+    const openResponse = parseJsonObject(output, HERDR_JJ_PLUGIN_COMMAND);
+    const openResult = responseResult(openResponse, HERDR_JJ_PLUGIN_COMMAND);
+    const pluginPane = isRecord(openResult.plugin_pane) ? openResult.plugin_pane : undefined;
+    const pane = pluginPane && isRecord(pluginPane.pane) ? pluginPane.pane : undefined;
+    const paneId = pane ? stringField(pane, "pane_id") : undefined;
+    if (!paneId) throw new Error(`Herdr plugin command ${HERDR_JJ_PLUGIN_COMMAND} did not open its wizard pane.`);
+    return paneId;
+  }
+
+  throw new Error(`Timed out waiting for Herdr plugin command ${HERDR_JJ_PLUGIN_COMMAND} (${logId}) to open its wizard pane.`);
+}
+
 async function waitForHerdrWizard(cwd: string, paneId: string): Promise<void> {
   const deadline = Date.now() + HERDR_PANE_READY_TIMEOUT_MS;
   let output = "";
@@ -2000,33 +2037,22 @@ async function createTaskWorkspace(
   if (fs.existsSync(rootPath)) throw new Error(`Herdr task workspace path already exists: ${rootPath}`);
 
   await runHerdr(mainCwd, ["workspace", "focus", herdrConfig.sourceWorkspaceId]);
-  const open = await runHerdr(mainCwd, [
-    "plugin",
-    "pane",
-    "open",
-    "--plugin",
-    HERDR_JJ_PLUGIN_ID,
-    "--entrypoint",
-    HERDR_JJ_PLUGIN_ENTRYPOINT,
-    "--placement",
-    "overlay",
-    "--env",
-    `JJ_REPO=${repositoryRoot}`,
-    "--env",
-    "JJ_OPEN=workspace",
-    "--env",
-    `JJ_BASE_REV=${baseRevision}`,
-    "--env",
-    `JJ_WORKSPACE_ROOT=${herdrConfig.workspaceRoot}`,
-    "--focus",
-  ]);
-  const openResponse = parseJsonObject(open.stdout, "herdr plugin pane open");
-  const openResult = responseResult(openResponse, "herdr plugin pane open");
-  const pluginPane = isRecord(openResult.plugin_pane) ? openResult.plugin_pane : undefined;
-  const pane = pluginPane && isRecord(pluginPane.pane) ? pluginPane.pane : undefined;
-  const wizardPaneId = pane ? stringField(pane, "pane_id") : undefined;
-  if (!wizardPaneId) throw new Error("herdr plugin pane open did not return the jj-workspace wizard pane id.");
+  const invoke = await runHerdr(mainCwd, ["plugin", "action", "invoke", HERDR_JJ_PLUGIN_COMMAND]);
+  const invokeResponse = parseJsonObject(invoke.stdout, `herdr plugin action invoke ${HERDR_JJ_PLUGIN_COMMAND}`);
+  const invokeResult = responseResult(invokeResponse, `herdr plugin action invoke ${HERDR_JJ_PLUGIN_COMMAND}`);
+  const action = isRecord(invokeResult.action) ? invokeResult.action : undefined;
+  if (
+    !action ||
+    stringField(action, "plugin_id") !== HERDR_JJ_PLUGIN_ID ||
+    stringField(action, "action_id") !== HERDR_JJ_PLUGIN_ACTION_ID
+  ) {
+    throw new Error(`Herdr did not invoke the expected plugin command ${HERDR_JJ_PLUGIN_COMMAND}.`);
+  }
+  const actionLog = isRecord(invokeResult.log) ? invokeResult.log : undefined;
+  const actionLogId = actionLog ? stringField(actionLog, "log_id") : undefined;
+  if (!actionLogId) throw new Error(`Herdr plugin command ${HERDR_JJ_PLUGIN_COMMAND} did not return an action log id.`);
 
+  const wizardPaneId = await waitForHerdrPluginActionPane(mainCwd, actionLogId);
   let wizardOutput = "";
   try {
     await waitForHerdrWizard(mainCwd, wizardPaneId);
@@ -2036,6 +2062,10 @@ async function createTaskWorkspace(
     while (Date.now() < deadline) {
       const herdrWorkspaceId = await findHerdrWorkspaceByLabel(mainCwd, workspaceName, rootPath);
       if (herdrWorkspaceId && fs.existsSync(path.join(rootPath, ".jj"))) {
+        // The action intentionally creates no bookmark. Move its empty working-copy commit
+        // onto the latest integrated revision before handing the workspace to the builder.
+        await runJj(rootPath, ["rebase", "-s", "@", "-d", baseRevision]);
+
         const relativeCwd = path.relative(sourceWorkspaceRoot, mainCwd);
         const workspaceCwd = relativeCwd && !relativeCwd.startsWith("..") && !path.isAbsolute(relativeCwd)
           ? path.join(rootPath, relativeCwd)
@@ -2842,12 +2872,12 @@ export default function (pi: ExtensionAPI) {
     name: "plan_file_build",
     label: "Build Plan File",
     description:
-      `Run native interactive Pi builder panes with the model and effort selected in the main pi process for ready tasks in a planner-created plan file. Independent tasks run in parallel Herdr-managed Jujutsu workspaces created through ${HERDR_JJ_PLUGIN_ID}, then are integrated serially onto the main workspace. A builder monitor cancels/restarts stuck attempts. Set runVerifier to true to run the verifier agent afterward and write .pi/outputs/findings.html.`,
+      `Run native interactive Pi builder panes with the model and effort selected in the main pi process for ready tasks in a planner-created plan file. Independent tasks run in parallel Herdr-managed Jujutsu workspaces created without bookmarks through ${HERDR_JJ_PLUGIN_COMMAND}, then are integrated serially onto the main workspace. A builder monitor cancels/restarts stuck attempts. Set runVerifier to true to run the verifier agent afterward and write .pi/outputs/findings.html.`,
     promptSnippet: "Run interactive Pi builders with the current model and effort in monitored Herdr task panes; optionally run verifier afterward.",
     promptGuidelines: [
       "Use plan_file_build when the user asks builder agents to implement tasks from a plan file.",
       "Use plan_file_build only after a plan file exists, usually from plan_file_create.",
-      `plan_file_build uses ${HERDR_JJ_PLUGIN_ID} to create separate Herdr-managed Jujutsu workspaces for independent tasks, runs each builder in a native interactive Pi pane, mirrors pane output, cancels/restarts stuck builder attempts, requires one atomic Jujutsu (jj) commit per task, and integrates completed commits serially.`,
+      `plan_file_build uses ${HERDR_JJ_PLUGIN_COMMAND} to create separate Herdr-managed Jujutsu workspaces without bookmarks for independent tasks, runs each builder in a native interactive Pi pane, mirrors pane output, cancels/restarts stuck builder attempts, requires one atomic Jujutsu (jj) commit per task, and integrates completed commits serially.`,
       "Set plan_file_build runVerifier to true only when the user explicitly asks for verifier-agent review; verification is skipped by default.",
       "To trigger verifier review after a completed build, call plan_file_build again for the same plan with runVerifier true; completed tasks are skipped.",
     ],
@@ -3069,7 +3099,7 @@ export default function (pi: ExtensionAPI) {
     if (!activeTools.has("plan_file_create") && !activeTools.has("plan_file_build")) return;
 
     return {
-      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- plan_file_create can pause to surface material planner questions through the parent pi UI and resume with the user's answers.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build uses the ${HERDR_JJ_PLUGIN_ID} Herdr plugin to create a Herdr-managed Jujutsu workspace for each independent task; it does not call jj workspace add directly.\n- plan_file_build runs builders in parallel as native interactive Pi panes, mirrors Herdr pane output, and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task and integrates completed commits serially onto the main workspace.\n- Verifier-agent review is optional and skipped by default; set plan_file_build runVerifier to true only when the user explicitly asks for it. Calling it again for a completed plan skips done tasks and runs the requested review.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
+      systemPrompt: `${event.systemPrompt}\n\nPlanner-builder workflow:\n- Use plan_file_create when the user wants a planner agent to create a plan file for builder agents.\n- plan_file_create can pause to surface material planner questions through the parent pi UI and resume with the user's answers.\n- Use plan_file_build when the user wants builder agents to implement tasks from that plan file.\n- plan_file_build uses the ${HERDR_JJ_PLUGIN_COMMAND} Herdr plugin command to create a Herdr-managed Jujutsu workspace without a bookmark for each independent task; it does not call jj workspace add directly.\n- plan_file_build runs builders in parallel as native interactive Pi panes, mirrors Herdr pane output, and cancels/restarts stuck attempts.\n- plan_file_build requires one atomic Jujutsu (jj) commit for each completed task and integrates completed commits serially onto the main workspace.\n- Verifier-agent review is optional and skipped by default; set plan_file_build runVerifier to true only when the user explicitly asks for it. Calling it again for a completed plan skips done tasks and runs the requested review.\n- Plan files live in ${DEFAULT_PLAN_DIR} by default and contain machine-readable "### Task TNN:" blocks.`,
     };
   });
 }
