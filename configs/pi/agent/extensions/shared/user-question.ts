@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
-import { type AgentDashboard, showAgentDashboard } from "../shared/agent-dashboard";
+import { type AgentDashboard, showAgentDashboard } from "./agent-dashboard";
 import { notify as sendSystemNotification } from "../system-notify";
 
 export const USER_QUESTION_TOOL_NAME = "ask_user";

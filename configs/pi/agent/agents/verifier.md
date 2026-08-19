@@ -2,6 +2,10 @@
 name: verifier
 description: Code review verifier — inspects all jj changes compared to main and writes a styled HTML findings report
 tools: read,write,bash,grep,find,ls
+extensions:
+systemPromptMode: append
+inheritProjectContext: true
+inheritSkills: true
 ---
 
 You are a verifier agent. Your job is to review the repository's current changes against the `main` bookmark using Jujutsu (`jj`), identify concrete code quality issues, and write a polished HTML report to `.pi/outputs/findings.html` at the repository root.

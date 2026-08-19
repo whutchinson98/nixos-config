@@ -19,7 +19,7 @@ import {
   type AgentScope,
   discoverAgents,
   formatAgentList,
-} from "../subagent/agents";
+} from "../shared/agent-discovery";
 import {
   createUserQuestionBridge,
   parseUserQuestion,
@@ -29,7 +29,7 @@ import {
   type UserQuestionHandler,
   type UserQuestionResponse,
   writeUserQuestionResponse,
-} from "../subagent/user-question";
+} from "../shared/user-question";
 import { notify as sendSystemNotification } from "../system-notify";
 import {
   hidePlanBuildDashboard,
@@ -69,6 +69,7 @@ const MAX_BUILDER_RESTARTS = 5;
 const HERDR_JJ_PLUGIN_ID = "whutchinson98.jj-workspace";
 const HERDR_JJ_PLUGIN_ACTION_ID = "new-no-bookmark";
 const HERDR_JJ_PLUGIN_COMMAND = `${HERDR_JJ_PLUGIN_ID}.${HERDR_JJ_PLUGIN_ACTION_ID}`;
+const SUPERVISOR_TOOL_NAME = "contact_supervisor";
 const HERDR_PANE_READY_TIMEOUT_MS = 10_000;
 const HERDR_WORKSPACE_CREATE_TIMEOUT_MS = 120_000;
 const HERDR_POLL_INTERVAL_MS = 250;
@@ -860,11 +861,19 @@ async function runAgent(
     };
   }
 
+  const usesUserQuestionBridge = Boolean(options.userQuestionHandler && agent.tools?.includes(SUPERVISOR_TOOL_NAME));
+  const agentTools = usesUserQuestionBridge
+    ? agent.tools?.map((tool) => tool === SUPERVISOR_TOOL_NAME ? USER_QUESTION_TOOL_NAME : tool)
+    : agent.tools;
+  const agentSystemPrompt = usesUserQuestionBridge
+    ? agent.systemPrompt.replaceAll(SUPERVISOR_TOOL_NAME, USER_QUESTION_TOOL_NAME)
+    : agent.systemPrompt;
+
   const args = ["--mode", "json", "-p", "--no-session"];
   if (!agent.includeExtensions) args.push("--no-extensions");
   if (model) args.push("--model", model);
   if (thinkingLevel) args.push("--thinking", thinkingLevel);
-  if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+  if (agentTools?.length) args.push("--tools", agentTools.join(","));
 
   let promptDir: string | undefined;
   let maxEffortExtensionDir: string | undefined;
@@ -872,7 +881,7 @@ async function runAgent(
   const messages: Message[] = [];
 
   try {
-    if (options.userQuestionHandler && agent.tools?.includes(USER_QUESTION_TOOL_NAME)) {
+    if (options.userQuestionHandler && agentTools?.includes(USER_QUESTION_TOOL_NAME)) {
       userQuestionBridge = await createUserQuestionBridge();
       args.push("--extension", userQuestionBridge.extensionPath);
     }
@@ -883,8 +892,8 @@ async function runAgent(
       args.push("--extension", extension.filePath);
     }
 
-    if (agent.systemPrompt.trim()) {
-      const prompt = await writePromptToTempFile(agent.name, agent.systemPrompt);
+    if (agentSystemPrompt.trim()) {
+      const prompt = await writePromptToTempFile(agent.name, agentSystemPrompt);
       promptDir = prompt.dir;
       args.push("--append-system-prompt", prompt.filePath);
     }

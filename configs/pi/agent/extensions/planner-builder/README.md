@@ -20,7 +20,7 @@ Creates planner-generated plan files and dispatches each builder as a native int
 
 ## Planner questions
 
-The `planner` agent has an `ask_user` tool for decisions that materially affect scope, architecture, or implementation details. The child planner process pauses while the planner-builder extension sends a system notification and switches the live dashboard to an interactive question view. The user can send a suggested choice or select `Write a different answer...` to type additional information, after which the same planner run resumes. Questions are recorded in the `plan_file_create` result details.
+The `planner` agent normally uses upstream `pi-subagents`' `contact_supervisor` tool for decisions that materially affect scope, architecture, or implementation details. Planner-builder translates that tool to its private `ask_user` bridge for plan creation. The child planner process pauses while the planner-builder extension sends a system notification and switches the live dashboard to an interactive question view. The user can send a suggested choice or select `Write a different answer...` to type additional information, after which the same planner run resumes. Questions are recorded in the `plan_file_create` result details.
 
 The planner is instructed to inspect the repository first and not ask questions the codebase can answer. If the run is non-interactive or the user cancels the question, the planner continues with the safest reasonable assumption and documents it in the plan.
 
@@ -89,7 +89,7 @@ Cancelling a build sends Escape to each active builder and closes its pane. A st
 
 On terminal completion, the extension extracts the last standalone `PLAN_TASK_RESULT: done`, `failed`, or `blocked` line from the final pane snapshot. Marker examples inside Markdown code fences are ignored. `failed` and `blocked` markers determine the task result; clean completion without a marker retains the existing success fallback, after which `done` still must pass the one-non-empty-commit validation. Naturally completed failed or blocked panes remain available in their retained workspaces. After a successful validation and serial integration, cleanup closes the entire Herdr task workspace, restores the source workspace, runs `jj workspace forget`, and deletes the checkout.
 
-The planner and optional verifier are unchanged: they continue as locally spawned structured JSON subprocesses. Planner `ask_user` questions still use the interactive dashboard response view, and verifier review remains opt-in.
+The planner and optional verifier continue as locally spawned structured JSON subprocesses rather than upstream subagent runs. Planner-builder's translated `ask_user` questions still use the interactive dashboard response view, and verifier review remains opt-in.
 
 ## Plan format
 

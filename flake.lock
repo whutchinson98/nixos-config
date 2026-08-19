@@ -512,6 +512,23 @@
         "type": "github"
       }
     },
+    "pi-subagents": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1787152609,
+        "narHash": "sha256-aHfnc1anvl4g5a2Aa9iYtbOmr7bV4Jx5ICBejxruV6o=",
+        "owner": "nicobailon",
+        "repo": "pi-subagents",
+        "rev": "71ba8a56e5e3a4be29f16472e823a72cebf3247c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nicobailon",
+        "repo": "pi-subagents",
+        "rev": "71ba8a56e5e3a4be29f16472e823a72cebf3247c",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "claude-code-nix": "claude-code-nix",
@@ -527,6 +544,7 @@
         "nixpkgs-stable": "nixpkgs-stable_2",
         "noctalia": "noctalia",
         "notification-proxy": "notification-proxy",
+        "pi-subagents": "pi-subagents",
         "sops-nix": "sops-nix",
         "zen-browser": "zen-browser"
       }

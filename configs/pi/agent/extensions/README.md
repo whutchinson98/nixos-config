@@ -36,7 +36,7 @@ The VCS status is intentionally Jujutsu-based and does not call `git`.
 
 `initialize-workspace.ts` runs on Pi session startup. It searches from the session cwd up to the nearest `flake.nix`, normalizes the repository paths reported by `jj git remote list`, and continues only when at least one exactly matches a line in `~/workspace-repos`. For matching repositories on NixOS with `direnv` installed, it ensures `.envrc` contains `use flake` and `watch_file nix/*.nix`, then runs `direnv allow` from the flake root.
 
-Managed agent runs set `PI_SUBAGENT=1`. When this extension sees that environment variable and `nix` is available, it overrides only that agent process's `bash` tool with wrappers for `cargo`, `bun`, `npm`, `pnpm`, `go`, `just`, and `doppler`. Invocations of those commands run through `nix develop <flake-root> -c`; all other commands run directly. The main Pi process still uses its normal bash tool.
+Planner-builder runs set `PI_SUBAGENT=1`, while upstream `pi-subagents` children set `PI_SUBAGENT_CHILD=1`. When this extension sees either environment variable and `nix` is available, it overrides only that agent process's `bash` tool with wrappers for `cargo`, `bun`, `npm`, `pnpm`, `go`, `just`, and `doppler`. Invocations of those commands run through `nix develop <flake-root> -c`; all other commands run directly. The main Pi process still uses its normal bash tool.
 
 Builder agents opt in to loading extensions, so the startup hook and subagent-only command wrappers run inside the native interactive Pi process in the Herdr task pane rather than a piped builder subprocess.
 
@@ -46,16 +46,16 @@ Builder agents opt in to loading extensions, so the startup hook and subagent-on
 
 ## Subagents
 
-`subagent/` registers:
+`subagent/` loads a Nix-pinned build of [`nicobailon/pi-subagents`](https://github.com/nicobailon/pi-subagents), including its npm dependencies, bundled agents, skill, and prompt templates.
 
 | Tool | Purpose |
 | --- | --- |
-| `agent_list` | List agents discovered from `~/.pi/agent/agents` and, when requested, trusted project `.pi/agents` directories. |
-| `subagent` | Spawn one or more agents in isolated `pi --mode json --no-session` subprocesses. |
+| `subagent` | Delegate to one agent, run a scripted multi-agent workflow, or manage active and retained runs. |
+| `subagent_wait` | Wait for one or all background runs, or register a non-blocking completion wake-up. |
 
-Subagent subprocesses use `--no-extensions` by default unless an agent frontmatter sets `includeExtensions: true`; pass `includeExtensions` to the tool to override that behavior for a specific call. If an agent's tool allowlist contains `ask_user`, the extension injects an isolated question bridge so the subprocess can pause, send a system notification, collect a suggested or custom answer in the live dashboard, and continue. Concurrent agent questions are announced and shown one at a time.
+The extension supports foreground and background child sessions, WorkflowScript orchestration, FleetView, `/subagents-fleet`, steering and stopping active children, and `contact_supervisor`/`subagent_supervisor` coordination. This configuration sets `asyncByDefault: false`, disables missions initially, and patches the default discovery scope from `both` to `user`; project agents must be requested explicitly. The old top-level `tasks` and `chain` tool inputs, `agent_list`, `/agents`, and the per-call full-screen dashboard are no longer provided.
 
-Subagent calls open a full-screen dashboard modeled after `davis7dotsh/my-pi-setup`: every running agent is visible in the bordered list, each row opens a full-height live output view, and pending questions temporarily replace the navigator with an interactive response view. It also registers `/subagents` to hide or restore that dashboard and `/agents [user|project|both]` for interactive discovery.
+Local `planner` and `investigate` definitions use `contact_supervisor` for normal upstream runs. Planner-builder still uses the shared local agent discovery and question modules, and translates `contact_supervisor` to its private `ask_user` bridge so `/plan-create` retains direct suggested/custom-answer UI.
 
 ## Planner-builder workflow
 

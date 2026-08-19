@@ -47,7 +47,7 @@ async function isConfiguredWorkspace(pi: ExtensionAPI, cwd: string): Promise<boo
 }
 
 function isSubagentProcess(): boolean {
-  return process.env.PI_SUBAGENT === "1";
+  return process.env.PI_SUBAGENT === "1" || process.env.PI_SUBAGENT_CHILD === "1";
 }
 
 function shellQuote(value: string): string {

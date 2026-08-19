@@ -1,0 +1,7 @@
+{
+  "asyncByDefault": false,
+  "missions": {
+    "enabled": false
+  },
+  "artifactDir": "session"
+}

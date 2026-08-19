@@ -19,7 +19,7 @@ The `agent/extensions/dashboard` extension is inspired by [davis7dotsh/my-pi-set
 
 The `agent/extensions/file-search` extension registers first-class `fd` and `rg` tools. The binaries are provided by Nix (`fd` and `ripgrep` in `modules/dev/ai.nix`) rather than downloaded at pi startup.
 
-The `agent/extensions/subagent` extension registers `agent_list` and `subagent` tools so pi can list and spawn the agents in `agent/agents/`. Subagent runs open a full-screen bordered dashboard modeled after `davis7dotsh/my-pi-setup`, with every agent visible and a scrollable live-output view. Agents that opt into the `ask_user` tool can pause, send a system notification, and switch the dashboard to an interactive response view for suggested or custom answers before continuing.
+The `agent/extensions/subagent` adapter loads a Nix-pinned build of [`nicobailon/pi-subagents`](https://github.com/nicobailon/pi-subagents). It provides `subagent` and `subagent_wait`, packaged and local agents, scripted workflows, foreground/background execution, FleetView, `/subagents-fleet`, and supervisor communication. The upstream agent scope is patched to default to user agents; project agents must be requested explicitly. Local `planner` and `investigate` agents use `contact_supervisor` during ordinary delegation, while planner-builder retains its private interactive `ask_user` dashboard bridge.
 
 The read-only `investigate` agent answers codebase questions with repository evidence and actionable next steps. Invoke it with `/investigate <question>` or by starting a request with `investigate`.
 
