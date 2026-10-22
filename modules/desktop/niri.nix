@@ -82,9 +82,8 @@
           };
 
           spawn-at-startup = [
-            { command = [ "noctalia-shell" ]; }
+            { command = [ "noctalia" ]; }
             { command = [ "xwayland-satellite" ]; }
-            { command = [ "lxqt-policykit-agent" ]; }
             { command = [ "1password" ]; }
           ];
 
@@ -196,11 +195,10 @@
             "Mod+T".action.spawn = [ "alacritty" ];
             # "Mod+P".action.spawn = [ "fuzzel" ];
             "Mod+P".action.spawn = [
-              "noctalia-shell"
-              "ipc"
-              "call"
+              "noctalia"
+              "msg"
+              "panel-toggle"
               "launcher"
-              "toggle"
             ];
             "Mod+N".action.spawn = [
               "alacritty"
