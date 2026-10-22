@@ -50,7 +50,7 @@ in
         };
 
         jellyfin.enable = true;
-        jellyseerr.enable = true;
+        seerr.enable = true;
 
         bazarr.enable = true;
         radarr.enable = true;
