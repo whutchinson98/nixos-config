@@ -12,5 +12,15 @@
         claude-code
         inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default
       ];
+
+      xdg.configFile."herdr/config.toml" = {
+        force = true;
+        text = ''
+          onboarding = false
+
+          [keys]
+          split_vertical = "prefix+|"
+        '';
+      };
     };
 }
