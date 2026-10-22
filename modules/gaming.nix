@@ -13,7 +13,8 @@
 
       programs.steam = {
         enable = true;
-        package = pkgs.stable.steam;
+        # Keep Steam's runtime libraries aligned with the system graphics drivers.
+        package = pkgs.steam;
         remotePlay.openFirewall = true;
         dedicatedServer.openFirewall = true;
         localNetworkGameTransfers.openFirewall = true;
