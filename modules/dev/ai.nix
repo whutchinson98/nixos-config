@@ -74,9 +74,7 @@
           fd
           ripgrep
           codex
-          inputs.claude-code-nix.packages.${pkgs.stdenv.hostPlatform.system}.default
-          # inputs.pi-mono-nix.packages.${pkgs.stdenv.hostPlatform.system}.default
-          pi-coding-agent
+          claude-code
           inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default
         ])
         ++ [ mcpRemote ];
