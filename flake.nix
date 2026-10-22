@@ -27,12 +27,8 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     herdr = {
-      url = "github:ogulcancelik/herdr/v0.7.4";
+      url = "github:ogulcancelik/herdr/v0.9.5";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
-    pi-subagents = {
-      url = "github:nicobailon/pi-subagents/71ba8a56e5e3a4be29f16472e823a72cebf3247c";
-      flake = false;
     };
 
     nixos-hardware.url = "github:NixOS/nixos-hardware";

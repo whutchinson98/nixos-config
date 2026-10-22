@@ -25,8 +25,6 @@
           home-manager.users.hutch = {
             dotfiles.aws.credentialProvider = "default-chain";
 
-            home.sessionVariables.IS_PI_REMOTE = "1";
-
             programs.ssh = {
               enable = true;
             };

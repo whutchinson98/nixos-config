@@ -138,16 +138,16 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1784133039,
-        "narHash": "sha256-dBOQYLFitJ+E3XNz44Ag3CIrBxFj16CmVPp7qil0ssg=",
+        "lastModified": 1791993401,
+        "narHash": "sha256-N7e7oCKxeCoxek6UT8Lweq16rSsQQi34QMb7C2iNpm8=",
         "owner": "ogulcancelik",
         "repo": "herdr",
-        "rev": "50aaa2ec046ee26ff407c20f49de496f522512a8",
+        "rev": "2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01",
         "type": "github"
       },
       "original": {
         "owner": "ogulcancelik",
-        "ref": "v0.7.4",
+        "ref": "v0.9.5",
         "repo": "herdr",
         "type": "github"
       }
@@ -391,11 +391,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1792653901,
-        "narHash": "sha256-78muVLcTK0P73ir65B88rr+MesTEemMrxywYQs9RVLk=",
+        "lastModified": 1792679383,
+        "narHash": "sha256-nYxj6UjePv5IQq0/dxsT3A5qU57seUE0DY5NXrMyUo8=",
         "owner": "noctalia-dev",
         "repo": "noctalia",
-        "rev": "15051a8251435dfcb9abdb2c63b9cf401f2f0d58",
+        "rev": "2e83bf2a5cf73629c12bb58e2f3d36e36104a6cb",
         "type": "github"
       },
       "original": {
@@ -427,23 +427,6 @@
         "type": "github"
       }
     },
-    "pi-subagents": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1787152609,
-        "narHash": "sha256-aHfnc1anvl4g5a2Aa9iYtbOmr7bV4Jx5ICBejxruV6o=",
-        "owner": "nicobailon",
-        "repo": "pi-subagents",
-        "rev": "71ba8a56e5e3a4be29f16472e823a72cebf3247c",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nicobailon",
-        "repo": "pi-subagents",
-        "rev": "71ba8a56e5e3a4be29f16472e823a72cebf3247c",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
@@ -458,7 +441,6 @@
         "nixpkgs-stable": "nixpkgs-stable_2",
         "noctalia": "noctalia",
         "notification-proxy": "notification-proxy",
-        "pi-subagents": "pi-subagents",
         "sops-nix": "sops-nix"
       }
     },
