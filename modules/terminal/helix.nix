@@ -5,7 +5,7 @@
       programs.helix = {
         enable = true;
         settings = {
-          theme = "nord";
+          theme = "gruvbox";
           editor = {
             bufferline = "multiple";
             file-picker = {

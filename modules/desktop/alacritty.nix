@@ -47,48 +47,48 @@
           ];
         };
 
-        # Doom Nord palette
+        # Gruvbox dark palette
         colors = {
           primary = {
-            background = "#2E3440";
-            foreground = "#ECEFF4";
+            background = "#282828";
+            foreground = "#ebdbb2";
           };
 
           cursor = {
-            text = "#2E3440";
-            cursor = "#81A1C1";
+            text = "#282828";
+            cursor = "#ebdbb2";
           };
 
           vi_mode_cursor = {
-            text = "#2E3440";
-            cursor = "#88C0D0";
+            text = "#282828";
+            cursor = "#fabd2f";
           };
 
           selection = {
             text = "CellForeground";
-            background = "#434C5E";
+            background = "#504945";
           };
 
           normal = {
-            black = "#2E3440";
-            red = "#BF616A";
-            green = "#A3BE8C";
-            yellow = "#EBCB8B";
-            blue = "#81A1C1";
-            magenta = "#B48EAD";
-            cyan = "#88C0D0";
-            white = "#D8DEE9";
+            black = "#282828";
+            red = "#cc241d";
+            green = "#98971a";
+            yellow = "#d79921";
+            blue = "#458588";
+            magenta = "#b16286";
+            cyan = "#689d6a";
+            white = "#a89984";
           };
 
           bright = {
-            black = "#9099AB";
-            red = "#C87880";
-            green = "#B0C79D";
-            yellow = "#EDD29C";
-            blue = "#93AFCA";
-            magenta = "#BF9EB9";
-            cyan = "#99C9D7";
-            white = "#F0F4FC";
+            black = "#928374";
+            red = "#fb4934";
+            green = "#b8bb26";
+            yellow = "#fabd2f";
+            blue = "#83a598";
+            magenta = "#d3869b";
+            cyan = "#8ec07c";
+            white = "#ebdbb2";
           };
         };
       };

@@ -35,7 +35,7 @@
           theme = {
             mode = "dark";
             source = "builtin";
-            builtin = "Nord";
+            builtin = "Gruvbox";
           };
 
           notification = {

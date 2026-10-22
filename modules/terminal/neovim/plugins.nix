@@ -4,7 +4,6 @@
     {
       programs.neovim.plugins = [
         pkgs.vimPlugins.friendly-snippets
-        pkgs.vimPlugins.gruvbox-nvim
         pkgs.vimPlugins.nvim-lspconfig
         pkgs.vimPlugins.nvim-web-devicons
         pkgs.vimPlugins.plenary-nvim
@@ -209,10 +208,11 @@
         }
 
         {
-          plugin = pkgs.vimPlugins.nord-nvim;
+          plugin = pkgs.vimPlugins.gruvbox-nvim;
           type = "lua";
           config = ''
-            vim.cmd("colorscheme nord")
+            vim.o.background = "dark"
+            vim.cmd("colorscheme gruvbox")
             vim.cmd(":hi statusline guibg=NONE")
           '';
         }
