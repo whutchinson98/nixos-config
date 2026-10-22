@@ -1,15 +1,10 @@
-# Zen browser
-{ inputs, ... }:
+# browser
 {
-  flake.modules.homeManager.desktop = {
-    imports = [ inputs.zen-browser.homeModules.beta ];
-
-    programs.zen-browser = {
-      enable = true;
-      profiles.default = {
-        isDefault = true;
-        path = "default";
-      };
+  flake.modules.homeManager.desktop =
+    { pkgs, ... }:
+    {
+      home.packages = [
+        pkgs.firefox
+      ];
     };
-  };
 }
