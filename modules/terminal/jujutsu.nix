@@ -13,7 +13,7 @@
           };
           remotes = {
             origin = {
-              auto-track-bookmarks = "glob:hutch/* | glob:whutchinson98/*";
+              auto-track-bookmarks = "glob:whutchinson98/*";
             };
             upstream = {
               auto-track-bookmarks = "main";
