@@ -12,6 +12,7 @@
         nixd
         nixfmt
         doppler
+        flyctl
         podman-compose
         sops
         age
