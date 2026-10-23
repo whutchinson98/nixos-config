@@ -16,6 +16,7 @@
         proton-vpn-cli
         brightnessctl
         obsidian
+        discord
       ];
     };
 }
