@@ -124,33 +124,33 @@
               name = "misc";
             };
             # Named targets let these bindings reach DP-2 from either monitor.
-            "dp2-1" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-2" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-3" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-4" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-5" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-6" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-7" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-8" = {
-              open-on-output = "DP-2";
-            };
-            "dp2-9" = {
-              open-on-output = "DP-2";
-            };
+            # "dp2-1" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-2" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-3" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-4" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-5" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-6" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-7" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-8" = {
+            #   open-on-output = "DP-2";
+            # };
+            # "dp2-9" = {
+            #   open-on-output = "DP-2";
+            # };
           };
 
           debug = {
@@ -268,25 +268,25 @@
             "Mod+Shift+8".action.move-column-to-workspace = 8;
             "Mod+Shift+9".action.move-column-to-workspace = 9;
 
-            "Mod+Ctrl+1".action.focus-workspace = "dp2-1";
-            "Mod+Ctrl+2".action.focus-workspace = "dp2-2";
-            "Mod+Ctrl+3".action.focus-workspace = "dp2-3";
-            "Mod+Ctrl+4".action.focus-workspace = "dp2-4";
-            "Mod+Ctrl+5".action.focus-workspace = "dp2-5";
-            "Mod+Ctrl+6".action.focus-workspace = "dp2-6";
-            "Mod+Ctrl+7".action.focus-workspace = "dp2-7";
-            "Mod+Ctrl+8".action.focus-workspace = "dp2-8";
-            "Mod+Ctrl+9".action.focus-workspace = "dp2-9";
+            # "Mod+Ctrl+1".action.focus-workspace = "dp2-1";
+            # "Mod+Ctrl+2".action.focus-workspace = "dp2-2";
+            # "Mod+Ctrl+3".action.focus-workspace = "dp2-3";
+            # "Mod+Ctrl+4".action.focus-workspace = "dp2-4";
+            # "Mod+Ctrl+5".action.focus-workspace = "dp2-5";
+            # "Mod+Ctrl+6".action.focus-workspace = "dp2-6";
+            # "Mod+Ctrl+7".action.focus-workspace = "dp2-7";
+            # "Mod+Ctrl+8".action.focus-workspace = "dp2-8";
+            # "Mod+Ctrl+9".action.focus-workspace = "dp2-9";
 
-            "Mod+Ctrl+Shift+1".action.move-window-to-workspace = "dp2-1";
-            "Mod+Ctrl+Shift+2".action.move-window-to-workspace = "dp2-2";
-            "Mod+Ctrl+Shift+3".action.move-window-to-workspace = "dp2-3";
-            "Mod+Ctrl+Shift+4".action.move-window-to-workspace = "dp2-4";
-            "Mod+Ctrl+Shift+5".action.move-window-to-workspace = "dp2-5";
-            "Mod+Ctrl+Shift+6".action.move-window-to-workspace = "dp2-6";
-            "Mod+Ctrl+Shift+7".action.move-window-to-workspace = "dp2-7";
-            "Mod+Ctrl+Shift+8".action.move-window-to-workspace = "dp2-8";
-            "Mod+Ctrl+Shift+9".action.move-window-to-workspace = "dp2-9";
+            # "Mod+Ctrl+Shift+1".action.move-window-to-workspace = "dp2-1";
+            # "Mod+Ctrl+Shift+2".action.move-window-to-workspace = "dp2-2";
+            # "Mod+Ctrl+Shift+3".action.move-window-to-workspace = "dp2-3";
+            # "Mod+Ctrl+Shift+4".action.move-window-to-workspace = "dp2-4";
+            # "Mod+Ctrl+Shift+5".action.move-window-to-workspace = "dp2-5";
+            # "Mod+Ctrl+Shift+6".action.move-window-to-workspace = "dp2-6";
+            # "Mod+Ctrl+Shift+7".action.move-window-to-workspace = "dp2-7";
+            # "Mod+Ctrl+Shift+8".action.move-window-to-workspace = "dp2-8";
+            # "Mod+Ctrl+Shift+9".action.move-window-to-workspace = "dp2-9";
 
             "Mod+Shift+Ctrl+Left".action.move-column-to-monitor-left = { };
             "Mod+Shift+Ctrl+Right".action.move-column-to-monitor-right = { };
