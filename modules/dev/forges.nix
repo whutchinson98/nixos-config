@@ -8,7 +8,6 @@
         gh-dash
         diffnav
         glab
-        codeberg-cli
       ];
     };
 }
