@@ -9,6 +9,7 @@
         protonup-qt
         wineWow64Packages.staging
         winetricks
+        wowup-cf
       ];
 
       programs.steam = {
