@@ -10,7 +10,6 @@
         terminal
         dev
         onepassword
-        bitwarden
         desktop
         audio
         tailscale

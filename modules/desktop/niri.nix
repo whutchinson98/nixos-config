@@ -85,7 +85,6 @@
             { command = [ "noctalia" ]; }
             { command = [ "xwayland-satellite" ]; }
             { command = [ "1password" ]; }
-            { command = [ "bitwarden" ]; }
           ];
 
           environment = {
