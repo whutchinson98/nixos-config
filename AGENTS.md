@@ -2,7 +2,8 @@
 
 ## Repo structure (dendritic pattern)
 
-- This flake uses flake-parts + import-tree: every `.nix` file under `modules/` is auto-loaded as a flake-parts module. There are no import lists — creating a file registers it.
+- This flake uses flake-parts + import-tree: every `.nix` file under `modules/` and `services/` is auto-loaded as a flake-parts module. There are no per-file import lists — creating a file registers it.
+- `services/` holds the personal service stack. Its files contribute to `flake.modules.nixos.services`, which Forge imports once to enable the whole stack. Shared Podman runtime/network configuration lives in `services/containers.nix`.
 - Files are organized by feature (aspect), not by host. A feature's NixOS config and Home Manager config live in the same file, registered under `flake.modules.nixos.<name>` and `flake.modules.homeManager.<name>`.
 - Multiple files may contribute to the same module name (e.g. everything in `modules/terminal/` merges into `flake.modules.homeManager.terminal`).
 - Hosts (`modules/hosts/<host>/host.nix`) compose named NixOS modules. Each feature's NixOS module attaches its corresponding Home Manager module to `hutch`; `modules/users/hutch.nix` only wires Home Manager and the baseline user config. Host-specific quirks stay inline in the host file.

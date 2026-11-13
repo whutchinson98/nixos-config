@@ -10,7 +10,7 @@
         terminal
         dev
         tailscale
-        podman
+        services
       ])
       ++ [
         ./_hardware.nix
