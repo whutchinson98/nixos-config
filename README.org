@@ -9,3 +9,8 @@ Desktop
 * Zephyr
 
 Laptop
+
+* Forge
+
+Personal services server. Imports the complete dendritic stack under
+[[file:services/README.org][services/]], starting with persistent PostgreSQL in Podman.

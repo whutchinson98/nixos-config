@@ -1,0 +1,78 @@
+#+title: Personal services
+
+Every =.nix= file in this directory is loaded by import-tree as a flake-parts
+module, just like =modules/=. Files contribute to =flake.modules.nixos.services=;
+Forge imports that module once. Add another file contributing to the same module
+to enable a new service on Forge. Prefix a path component with =_= to park it.
+
+=containers.nix= imports the existing Podman aspect and creates the shared
+=services= network. New OCI containers can use =networks = [ "services" ];= and
+require/order themselves after =podman-network-services.service=. Containers that
+depend on PostgreSQL can set =dependsOn = [ "postgresql" ];=; PostgreSQL's systemd
+unit reports ready only once its TCP health check succeeds.
+
+* PostgreSQL
+
+- Container: =postgresql=; unit: =podman-postgresql.service=; starts at boot.
+- Image: =docker.io/library/postgres:18= (major version fixed).
+- Host connection: =127.0.0.1:5432=; no database firewall port is opened.
+- Containers on the =services= network connect to =postgresql:5432=.
+- Initial admin user/database: =postgres= / =postgres=.
+- Persistent data: =/var/lib/services/postgresql=, mounted at =/var/lib/postgresql=.
+  PostgreSQL 18 stores its cluster in =18/docker/= below that mount.
+- Bootstrap password: =/var/lib/services/postgresql-secrets/password=. Generated
+  once on the host, accessible only to root, and mounted read-only into the
+  container. No password is stored in the repository or Nix store.
+
+The volume location follows the [[https://hub.docker.com/_/postgres][official PostgreSQL image documentation]].
+Container recreation, reboots, and NixOS rebuilds preserve the data and password.
+Persistence does not provide backups; arrange backups before relying on the
+database for irreplaceable data.
+
+Build and deploy using the existing workflow:
+
+#+begin_src sh
+nix build path:.#nixosConfigurations.forge.config.system.build.toplevel
+just deploy forge
+#+end_src
+
+On Forge, inspect the service and open a local admin session:
+
+#+begin_src sh
+sudo systemctl status podman-postgresql
+sudo journalctl -u podman-postgresql
+sudo podman exec -it postgresql psql -U postgres -d postgres
+#+end_src
+
+For a TCP client, retrieve the password with
+=sudo cat /var/lib/services/postgresql-secrets/password= on Forge. For access
+from another machine, forward the local port through SSH:
+
+#+begin_src sh
+ssh -L 5432:127.0.0.1:5432 hutch@forge
+#+end_src
+
+Create a separate database and non-superuser role for each application. For
+example, in the admin session (=\password= prompts without putting the password
+in SQL history):
+
+#+begin_src sql
+CREATE ROLE myapp LOGIN;
+\password myapp
+CREATE DATABASE myapp OWNER myapp;
+#+end_src
+
+=POSTGRES_*= bootstrap settings only initialize an empty cluster. Changing these
+values or the password file does not update existing roles/passwords; use SQL to
+change them. Preserve the password file alongside the data.
+
+The default pull policy uses a cached image when available. To apply a newer
+PostgreSQL 18 image, pull it explicitly, then restart the unit:
+
+#+begin_src sh
+sudo podman pull docker.io/library/postgres:18
+sudo systemctl restart podman-postgresql
+#+end_src
+
+Back up before upgrades. Changing the image's major version requires an explicit
+PostgreSQL migration (=pg_upgrade= or dump/restore), not just a tag change.
